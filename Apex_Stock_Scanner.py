@@ -20,7 +20,6 @@ RED = '#ff4444'
 ORANGE = '#ff9500' 
 TEXT_COLOR = '#ffffff'
 
-# --- 1. VISUAL HELPERS ---
 def draw_donut(ax, x, y, pct, label, color, size=0.22):
     pct = max(min(float(pct or 0), 100), 0)
     ax.add_patch(Wedge((x, y), size, 0, 360, width=size*0.35, color='#2c2e33', zorder=2))
@@ -35,7 +34,6 @@ def draw_fair_value_bar(ax, x, y, upside_pct):
     ax.add_patch(Rectangle((pos, y-0.05), 0.06, 0.35, color=GREEN, zorder=5))
     ax.text(x+1.1, y+0.4, "Fair Value Bar", color=TEXT_COLOR, ha='center', fontsize=10, fontweight='black')
 
-# --- 2. THE INFOGRAPHIC GENERATOR ---
 def create_infographic(ticker, row, info, fin):
     try:
         fig = plt.figure(figsize=(10, 13.5), facecolor=BG_COLOR)
@@ -43,52 +41,54 @@ def create_infographic(ticker, row, info, fin):
         ax.set_xlim(0, 10); ax.set_ylim(0, 14)
         ax.set_xticks([]); ax.set_yticks([])
 
-        # Header Info
+        # Header
         mcap = info.get('marketCap', 0) / 1e9
         ax.text(0.5, 12.8, ticker, fontsize=65, color=TEXT_COLOR, fontweight='black')
         ax.text(9.5, 13.0, f"${mcap:.1f}B Market Cap", fontsize=18, color=TEXT_COLOR, ha='right', fontweight='bold')
         ax.text(9.5, 12.4, f"{row['5Y_Perf']:.0f}% 5Y", fontsize=16, color=RED if row['5Y_Perf']<0 else GREEN, ha='right')
         ax.text(9.5, 12.0, f"{row['YTD_Perf']:.0f}% YTD", fontsize=16, color=RED if row['YTD_Perf']<0 else GREEN, ha='right')
 
-        # Financial Bars (Rev, Net, FCF)
+        # Financial Bars - STABILITY FIX
         if not fin.empty:
-            revs = fin.get('Total Revenue', pd.Series(dtype=float)).tail(7) / 1e9
-            ni = fin.get('Net Income', pd.Series(dtype=float)).tail(7) / 1e9
-            fcf = (fin.get('Total Cash From Operating Activities', pd.Series(dtype=float)).tail(7) + 
-                   fin.get('Capital Expenditures', pd.Series(dtype=float)).tail(7)) / 1e9
+            # Last 5 years available
+            revs = (fin.get('Total Revenue', pd.Series(dtype=float)).tail(5) / 1e9).dropna()
+            ni = (fin.get('Net Income', pd.Series(dtype=float)).tail(5) / 1e9).dropna()
+            # Align indices to ensure we only plot common dates
+            common_idx = revs.index.intersection(ni.index)
+            revs, ni = revs.loc[common_idx], ni.loc[common_idx]
             
-            x_bars = np.linspace(0.8, 6.0, len(revs))
-            norm = revs.max() if revs.max() > 0 else 1
-            ax.bar(x_bars - 0.2, (revs/norm)*1.5, width=0.15, color='#ffffff')
-            ax.bar(x_bars, (ni/norm)*1.5 + 0.3, width=0.15, color=CYAN)
-            ax.bar(x_bars + 0.2, (fcf/norm)*1.5 + 0.1, width=0.15, color=RED)
-            for i, y_label in enumerate(revs.index):
-                ax.text(x_bars[i], 8.8, str(y_label.year), color='#888888', ha='center', fontsize=9)
-            ax.text(0.8, 11.0, "● Revenue  ● Net Income  ● FCF", color='#888888', fontsize=9)
+            if not revs.empty:
+                x_bars = np.linspace(0.8, 6.0, len(revs))
+                norm = revs.max() if revs.max() > 0 else 1
+                ax.bar(x_bars - 0.1, (revs/norm)*1.5, width=0.18, color='#ffffff')
+                ax.bar(x_bars + 0.1, (ni/norm)*1.5 + 0.3, width=0.18, color=CYAN)
+                for i, y_label in enumerate(revs.index):
+                    ax.text(x_bars[i], 8.8, str(y_label.year), color='#888888', ha='center', fontsize=9)
+            ax.text(0.8, 11.0, "● Revenue  ● Net Income", color='#888888', fontsize=9)
 
-        # Right Side: Margins
+        # Margins (Right)
         ax.text(7.2, 11.0, "Margins", fontsize=20, color=CYAN, fontweight='bold')
         draw_donut(ax, 7.2, 10.3, info.get('grossMargins', 0)*100, "Gross", CYAN)
         draw_donut(ax, 7.2, 9.5, info.get('ebitdaMargins', 0)*100, "EBIT", ORANGE)
         draw_donut(ax, 7.2, 8.7, info.get('profitMargins', 0)*100, "Net", CYAN)
         draw_donut(ax, 7.2, 7.9, (info.get('freeCashflow', 0)/info.get('totalRevenue', 1))*100 if info.get('totalRevenue') else 0, "FCF", RED)
 
-        # Bottom Left: Key Ratios
+        # Ratios (Bottom Left)
         ax.text(0.5, 7.8, "Key ratios", fontsize=18, color=ORANGE, fontweight='bold')
-        draw_donut(ax, 0.75, 7.1, info.get('payoutRatio', 0)*100, "BuyBack", ORANGE, size=0.18)
-        ax.text(0.5, 6.4, f"• {info.get('returnOnAssets', 0)*100:.1f}% ROIC", color=TEXT_COLOR, fontsize=12)
+        draw_donut(ax, 0.75, 7.1, info.get('payoutRatio', 0)*100, "Payout", ORANGE, size=0.18)
+        ax.text(0.5, 6.4, f"• {info.get('returnOnAssets', 0)*100:.1f}% ROA", color=TEXT_COLOR, fontsize=12)
         ax.text(0.5, 6.0, f"• ${info.get('totalCash', 0)/1e9:.1f}B Cash", color=TEXT_COLOR, fontsize=12)
         ax.text(0.5, 5.6, f"• {info.get('trailingPE', 0):.1f} P/E", color=TEXT_COLOR, fontsize=12)
 
-        # Bottom Center: Growth Since 2022
-        ax.text(3.5, 7.8, "Growth Since 2022", fontsize=18, color=RED, fontweight='bold')
-        draw_donut(ax, 3.75, 7.1, row.RS_Rating, "Revenue", CYAN, size=0.18)
+        # Growth (Center)
+        ax.text(3.5, 7.8, "Growth Track", fontsize=18, color=RED, fontweight='bold')
+        draw_donut(ax, 3.75, 7.1, row.RS_Rating, "RS Score", CYAN, size=0.18)
         ax.text(3.5, 6.4, f"• {row.RVOL}x Vol Spike", color=TEXT_COLOR, fontsize=12)
         ax.text(3.5, 6.0, f"• RS Rating: {row.RS_Rating}", color=TEXT_COLOR, fontsize=12)
         
-        # Bottom Center: Bull Case
+        # Bull Case
         ax.text(3.5, 5.0, "Bull Case", fontsize=18, color=GREEN, fontweight='bold')
-        ax.text(3.5, 4.5, "• Institutional Accumulation\n• Positive Trend Shift\n• High RS Relative to Sector", color=TEXT_COLOR, fontsize=11)
+        ax.text(3.5, 4.5, "• Institutional Buying\n• Momentum Lead\n• Sector Strength", color=TEXT_COLOR, fontsize=11)
 
         # Price Tag
         tag_poly = Polygon([[7.0, 5.5], [9.8, 5.5], [9.8, 1.2], [7.0, 1.2], [6.4, 3.35]], color=ORANGE)
@@ -97,11 +97,11 @@ def create_infographic(ticker, row, info, fin):
         ax.text(8.4, 4.9, "Price", color=BG_COLOR, ha='center', fontweight='bold', fontsize=14)
         ax.text(8.4, 4.0, f"${row.Price}", color=BG_COLOR, ha='center', fontsize=42, fontweight='black')
         
-        target = info.get('targetMeanPrice', 0)
-        upside = ((target/row.Price)-1)*100 if (target and row.Price) else 0
+        target = info.get('targetMeanPrice', row.Price)
+        upside = ((target/row.Price)-1)*100
         ax.text(8.4, 3.2, f"{upside:.1f}% OFF", color=BG_COLOR, ha='center', fontweight='black', 
                 bbox=dict(facecolor='white', edgecolor='none', boxstyle='round,pad=0.4'))
-        ax.text(8.4, 1.8, f"WS Consensus: ${target}", color=BG_COLOR, ha='center', fontsize=10, fontweight='bold')
+        ax.text(8.4, 1.8, f"Consensus: ${target:.1f}", color=BG_COLOR, ha='center', fontsize=10, fontweight='bold')
 
         draw_fair_value_bar(ax, 3.5, 2.2, upside)
 
@@ -110,9 +110,8 @@ def create_infographic(ticker, row, info, fin):
         buf.seek(0); plt.close()
         return buf
     except Exception as e:
-        print(f"❌ Error: {e}"); return None
+        print(f"❌ Render Skip for {ticker}: {e}"); return None
 
-# --- 3. MAIN SCANNER ENGINE ---
 def run_scanner():
     creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
     gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
