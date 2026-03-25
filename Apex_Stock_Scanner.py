@@ -46,23 +46,25 @@ def create_exact_infographic(ticker, row, info, fin):
 
         # --- 3-COL BAR CHART ---
         if not fin.empty:
-            df_chart = fin[['Total Revenue', 'Net Income', 'Free Cash Flow']].head(6)[::-1] / 1e6
+            cols = ['Total Revenue', 'Net Income', 'Free Cash Flow']
+            available = [c for c in cols if c in fin.columns]
+            df_chart = fin[available].head(6)[::-1] / 1e6
             x_pos = np.linspace(0.8, 6.5, len(df_chart))
             width = 0.14
-            norm = df_chart['Total Revenue'].max() if df_chart['Total Revenue'].max() > 0 else 1
+            norm = df_chart.iloc[:, 0].max() if not df_chart.empty and df_chart.iloc[:, 0].max() > 0 else 1
             for i, (idx, vals) in enumerate(df_chart.iterrows()):
                 ax.add_patch(Rectangle((x_pos[i]-width*1.5, 8.5), width, (vals[0]/norm)*2.5, color=BLACK))
-                ax.add_patch(Rectangle((x_pos[i]-width*0.5, 8.5), width, (vals[1]/norm)*2.5, color=TEAL))
-                ax.add_patch(Rectangle((x_pos[i]+width*0.5, 8.5), width, (vals[2]/norm)*2.5, color=RED))
-                ax.text(x_pos[i], 8.2, str(idx.year), ha='center', fontsize(8), color='#666666')
-        ax.text(0.8, 11.2, "● Revenue  ● Net Income  ● FCF", fontsize(9), color='#666666')
+                if len(vals) > 1: ax.add_patch(Rectangle((x_pos[i]-width*0.5, width), width, (vals[1]/norm)*2.5, color=TEAL))
+                if len(vals) > 2: ax.add_patch(Rectangle((x_pos[i]+width*0.5, width), width, (vals[2]/norm)*2.5, color=RED))
+                ax.text(x_pos[i], 8.2, str(idx.year), ha='center', fontsize=8, color='#666666')
+        ax.text(0.8, 11.2, "● Revenue  ● Net Income  ● FCF", fontsize=9, color='#666666')
 
         # --- MARGINS (RIGHT) ---
         ax.text(7.5, 11.2, "Margins", fontsize=18, fontweight='bold', color=TEAL)
         draw_ring(ax, 7.5, 10.5, info.get('grossMargins', 0)*100, "Gross", TEAL)
         draw_ring(ax, 7.5, 9.7, info.get('ebitdaMargins', 0)*100, "EBIT", RED)
         draw_ring(ax, 7.5, 8.9, info.get('profitMargins', 0)*100, "Net", TEAL)
-        fcf_m = (info.get('freeCashflow', 0)/info.get('totalRevenue', 1))*100
+        fcf_m = (info.get('freeCashflow', 0)/info.get('totalRevenue', 1))*100 if info.get('totalRevenue') else 0
         draw_ring(ax, 7.5, 8.1, fcf_m, "FCF", RED)
 
         # --- BOTTOM SECTIONS ---
@@ -77,7 +79,7 @@ def create_exact_infographic(ticker, row, info, fin):
         draw_ring(ax, 4.0, 5.8, info.get('earningsGrowth', 0)*100, "EPS CAGR", RED, size=0.18)
 
         # Growth Since 2022
-        ax.text(0.5, 4.0, "Growth Since 2022", fontsize(16), fontweight='bold', color=GREEN)
+        ax.text(0.5, 4.0, "Growth Since 2022", fontsize=16, fontweight='bold', color=GREEN)
         draw_ring(ax, 0.7, 3.3, row.RS_Rating, "Revenue", TEAL, size=0.15)
         draw_ring(ax, 0.7, 2.7, row.RVOL*50, "EPS", TEAL, size=0.15)
 
@@ -89,12 +91,12 @@ def create_exact_infographic(ticker, row, info, fin):
         ax.text(8.5, 3.9, f"${row.Price}", ha='center', fontweight='black', fontsize=38)
         
         t_mean = info.get('targetMeanPrice', row.Price)
-        upside = ((t_mean/row.Price)-1)*100
+        upside = ((t_mean/row.Price)-1)*100 if row.Price > 0 else 0
         ax.text(8.5, 3.1, f"{upside:.0f}% OFF", ha='center', fontweight='bold', bbox=dict(facecolor='white', edgecolor='none'))
         ax.text(8.5, 2.2, "WS Price Targets", ha='center', fontweight='bold', fontsize=9)
         ax.text(8.5, 1.8, f"${info.get('targetLowPrice', 0)} Low", ha='center', fontsize=8)
         ax.text(8.5, 1.5, f"${info.get('targetHighPrice', 0)} High", ha='center', fontsize=8)
-        ax.text(8.5, 1.2, f"${t_mean:.1f} Consensus", ha='center', fontsize(8), fontweight='bold')
+        ax.text(8.5, 1.2, f"${t_mean:.1f} Consensus", ha='center', fontsize=8, fontweight='bold')
 
         buf = io.BytesIO()
         plt.savefig(buf, format='png', dpi=200, facecolor=BG_WHITE, bbox_inches='tight')
@@ -120,7 +122,7 @@ def run_scanner():
             curr = df['Close'].iloc[-1]
             perf_5y = ((curr / df['Close'].iloc[0]) - 1) * 100
             perf_ytd = ((curr / df['Close'].loc[df.index >= f"{datetime.now().year}-01-01"].iloc[0]) - 1) * 100
-            # RESTORED COHR-STYLE LOGIC: Relative Strength * Volume Momentum
+            # RS logic that prioritizes leaders like COHR
             rs = (( (df['Close'] / data['SPY']['Close']).iloc[-1] / (df['Close'] / data['SPY']['Close']).rolling(150).mean().iloc[-1]) - 1) * 100
             rvol = df['Volume'].iloc[-1] / df['Volume'].rolling(20).mean().iloc[-1]
             results.append({'Stock': t, 'Price': round(curr, 2), 'RS_Rating': round(rs, 2), 'RVOL': round(rvol, 2), '5Y_Perf': perf_5y, 'YTD_Perf': perf_ytd, 'Score': rs + (rvol * 15)})
@@ -137,7 +139,7 @@ def run_scanner():
 
     sh.worksheet("Core Screener").update([df_full.columns.tolist()] + df_full.astype(str).values.tolist())
     sh.worksheet("Summary").update([df_top.columns.tolist()] + df_top.astype(str).values.tolist())
-    print("✅ Logic Restored. Design Matched.")
+    print("✅ Logic Corrected. Infographics Synced.")
 
 if __name__ == "__main__":
     run_scanner()
