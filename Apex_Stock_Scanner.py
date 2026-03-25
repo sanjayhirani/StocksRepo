@@ -12,9 +12,9 @@ import json
 from datetime import datetime
 from urllib.request import Request, urlopen
 
-# --- 1. AUTHENTICATION & INITIALIZATION ---
+# --- 1. AUTHENTICATION ---
 def get_client_ai():
-    # Corrected for the latest google-genai SDK
+    # Force the latest Client initialization
     return genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 def get_gspread_client():
@@ -23,28 +23,28 @@ def get_gspread_client():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     return gspread.authorize(creds)
 
-# --- 2. THE "INSTITUTIONAL" ANALYST (BESPOKE BRIEFING) ---
+# --- 2. THE "INSTITUTIONAL" ANALYST ---
 def get_bespoke_summary(ticker, row):
     client_ai = get_client_ai()
     try:
         t_obj = yf.Ticker(ticker)
         info = t_obj.info
         
-        # Pulling fundamental data for the briefing
+        # Pull fundamental data for the briefing
         g_margin = info.get('grossMargins', 0) * 100
         fcf_val = info.get('freeCashflow', 0)
         rev_val = info.get('totalRevenue', 1)
         fcf_margin = (fcf_val / rev_val) * 100 if fcf_val else 0
         cash = info.get('totalCash', 0) / 1e9
         pe = info.get('trailingPE', 'N/A')
-        biz = info.get('longBusinessSummary', 'Profile unavailable.')[:600]
+        biz = info.get('longBusinessSummary', 'Business profile data currently unavailable.')[:600]
 
         prompt = (
             f"Act as a Lead Equity Researcher. Create a 'One-Pager' briefing for {ticker}.\n"
             f"MARKET DATA: Price ${row.Price}, RS Rating {row.RS_Rating}, RVOL {row.RVOL}x, ADR {row['ADR%']}%.\n"
             f"FINANCIALS: Gross Margin {g_margin:.1f}%, FCF Margin {fcf_margin:.1f}%, Cash ${cash:.2f}B, P/E {pe}.\n"
             f"BUSINESS CONTEXT: {biz}\n"
-            "FORMAT (Bullet points only, no intro/outro text):\n"
+            "FORMAT (Bullet points only, no intro text):\n"
             "- Industry/Niche: [Brief description]\n"
             "- Institutional Context: [Why the RVOL/RS matters here]\n"
             "- Growth/Inflection: [Business driver for this breakout]\n"
@@ -52,14 +52,14 @@ def get_bespoke_summary(ticker, row):
             "- Verdict: [1-sentence trading conviction]"
         )
         
-        # FIX: Using the fully qualified model name to avoid 404 errors
+        # FIX: Using the Fully Qualified Name 'models/gemini-1.5-flash' to resolve 404
         response = client_ai.models.generate_content(
             model='models/gemini-1.5-flash', 
             contents=prompt
         )
         return response.text.strip()
     except Exception as e:
-        print(f"⚠️ AI Thesis failed for {ticker}: {str(e)}")
+        print(f"⚠️ AI Error for {ticker}: {e}")
         return f"- Analysis currently unavailable for {ticker}."
 
 # --- 3. ALERT DISPATCH ---
@@ -68,7 +68,6 @@ def send_telegram_alert(ticker, row, history_df, thesis):
     fig, ax = plt.subplots(figsize=(10, 6))
     prices = history_df['Close'].tail(60)
     
-    # Plotting
     ax.plot(prices.index, prices, color='#00d4ff', lw=3)
     ax.axhline(y=row.Buy_Trigger, color='#00ff88', ls='--', lw=2, label=f'ENTRY ${row.Buy_Trigger}')
     ax.axhline(y=row.Stop_Loss, color='#ff4444', ls='--', lw=2, label=f'STOP ${row.Stop_Loss}')
@@ -99,29 +98,23 @@ def send_telegram_alert(ticker, row, history_df, thesis):
 # --- 4. DATA INGESTION ---
 def get_tickers():
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'}
-    
-    # S&P 500
     req_sp = Request('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', headers=headers)
     with urlopen(req_sp) as response:
         sp500 = pd.read_html(io.BytesIO(response.read()))[0]['Symbol'].tolist()
-        
-    # Nasdaq 100
+    
     req_nas = Request('https://en.wikipedia.org/wiki/Nasdaq-100', headers=headers)
     with urlopen(req_nas) as response:
         nasdaq100 = pd.read_html(io.BytesIO(response.read()))[4]['Ticker'].tolist()
         
     return list(set([t.replace('.', '-') for t in sp500 + nasdaq100]))
 
-# --- 5. CORE EXECUTION ---
+# --- 5. ENGINE ---
 def run_scanner():
-    print(f"🚀 Initializing Apex Scan: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"🚀 Apex Scan Started: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     gc = get_gspread_client()
     sh = gc.open("Stock Scanner")
     
     tickers = get_tickers()
-    print(f"📡 Downloading and Analyzing {len(tickers)} symbols...")
-    
-    # Download 1 Year of daily data for all tickers + SPY
     data = yf.download(tickers + ["SPY"], period="1y", group_by='ticker', progress=False)
     spy_close = data['SPY']['Close']
     
@@ -133,34 +126,28 @@ def run_scanner():
             if len(df) < 100: continue
             
             curr_p = df['Close'].iloc[-1]
-            sma50 = df['Close'].rolling(50).mean().iloc[-1]
-            sma200 = df['Close'].rolling(200).mean().iloc[-1]
+            sma50, sma200 = df['Close'].rolling(50).mean().iloc[-1], df['Close'].rolling(200).mean().iloc[-1]
             
-            # Filter: Institutional Stage 2 Trend
+            # Filter: Bullish Trend
             if not (curr_p > sma50 > sma200): continue
             
-            # RS Calculation vs SPY
             rs_line = df['Close'] / spy_close
             rs_rating = round(((rs_line.iloc[-1] / rs_line.rolling(150).mean().iloc[-1]) - 1) * 100, 2)
             if rs_rating < 0: continue
             
-            # RVOL & ADR
             rvol = round(df['Volume'].iloc[-1] / df['Volume'].rolling(20).mean().iloc[-1], 2)
             adr = round(((df['High'] - df['Low']) / df['Low']).rolling(20).mean().iloc[-1] * 100, 2)
             
-            # Squeeze Logic
-            std = df['Close'].rolling(20).std()
-            atr = (df['High'] - df['Low']).rolling(20).mean()
+            std, atr = df['Close'].rolling(20).std(), (df['High'] - df['Low']).rolling(20).mean()
             is_sq = (2 * std.iloc[-1]) < (1.5 * atr.iloc[-1])
             
             buy = round(df['High'].tail(5).max() * 1.005, 2)
             stop = round(curr_p - (atr.iloc[-1] * 2), 2)
-            target = round(buy + (buy - stop) * 2.5, 2)
             
             results.append({
                 'Stock': t, 'Price': round(curr_p, 2), 'RS_Rating': rs_rating, 
                 'RVOL': rvol, 'ADR%': adr, 'Squeeze': 'YES' if is_sq else 'No',
-                'Buy_Trigger': buy, 'Stop_Loss': stop, 'Target': target,
+                'Buy_Trigger': buy, 'Stop_Loss': stop, 'Target': round(buy + (buy-stop)*2.5, 2),
                 'Score': round(rs_rating + (rvol * 5) + (10 if is_sq else 0), 2)
             })
         except: continue
@@ -168,37 +155,29 @@ def run_scanner():
     df_res = pd.DataFrame(results).sort_values('Score', ascending=False).head(100)
     df_sum = df_res[df_res['Squeeze'] == 'YES'].head(10).copy()
     
-    # AI Processing for Alerts & Summary
     if not df_sum.empty:
         theses = []
         for i, (idx, row) in enumerate(df_sum.iterrows()):
-            print(f"🧠 Generating Intelligence for {row.Stock}...")
+            print(f"🧠 Intelligence: {row.Stock}...")
             thesis = get_bespoke_summary(row.Stock, row)
             theses.append(thesis)
-            
-            # Telegram Alert for top 3
             if i < 3:
-                hist_data = yf.download(row.Stock, period='1y', progress=False)
-                send_telegram_alert(row.Stock, row, hist_data, thesis)
-        
+                send_telegram_alert(row.Stock, row, yf.download(row.Stock, period='1y', progress=False), thesis)
         df_sum['AI_Thesis'] = theses
     
-    # --- 6. OUTPUT TO GOOGLE SHEETS ---
-    # Core Sheet
+    # --- 6. OUTPUT ---
     try:
-        core_sheet = sh.worksheet("Core Screener")
-        core_sheet.clear()
-        core_sheet.update([df_res.columns.tolist()] + df_res.astype(str).values.tolist())
+        sh.worksheet("Core Screener").clear()
+        sh.worksheet("Core Screener").update([df_res.columns.tolist()] + df_res.astype(str).values.tolist())
         
-        # Summary Sheet
         sum_sheet = sh.worksheet("Summary")
         sum_sheet.clear()
         if not df_sum.empty:
             sum_sheet.update([df_sum.columns.tolist()] + df_sum.astype(str).values.tolist())
     except Exception as e:
-        print(f"⚠️ Sheet update error: {e}")
+        print(f"⚠️ Sheets Error: {e}")
     
-    print("🏁 Scan Complete. Check Telegram and Sheets.")
+    print("🏁 Scan Finished.")
 
 if __name__ == "__main__":
     run_scanner()
