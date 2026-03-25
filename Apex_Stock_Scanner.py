@@ -41,31 +41,33 @@ def create_exact_infographic(ticker, row, info, fin):
         ax.text(9.5, 12.7, f"{row['5Y_Perf']:.0f}% 5Y", ha='right', fontsize=18, color=GREEN if row['5Y_Perf']>0 else RED)
         ax.text(9.5, 12.2, f"{row['YTD_Perf']:.0f}% YTD", ha='right', fontsize=18, color=GREEN if row['YTD_Perf']>0 else RED)
 
-        # --- FINANCIAL BARS (RESILIENT LOGIC) ---
+        # --- FINANCIAL BARS (NON-BLOCKING) ---
         ax.text(0.8, 11.2, "● Revenue  ● Net Income  ● FCF", fontsize=10, color='#666666')
-        if fin is not None and not fin.empty:
-            df = fin.T if fin.shape[0] < fin.shape[1] else fin
-            r = df.get('Total Revenue', pd.Series(0, index=df.index))
-            n = df.get('Net Income', pd.Series(0, index=df.index))
-            f = df.get('Free Cash Flow', df.get('Operating Cash Flow', pd.Series(0, index=df.index)))
-            
-            df_plot = pd.DataFrame({'R': r, 'N': n, 'F': f}).replace([np.inf, -np.inf], 0).fillna(0).head(7)[::-1]
-            if not df_plot.empty:
-                x_pts = np.linspace(0.8, 6.2, len(df_plot))
-                w = 0.14
-                norm = df_plot['R'].max() if df_plot['R'].max() > 0 else 1
-                for i, (idx, v) in enumerate(df_plot.iterrows()):
-                    ax.add_patch(Rectangle((x_pts[i]-w*1.5, 8.5), w, (safe_float(v[0])/norm)*2.5, color=BLACK))
-                    ax.add_patch(Rectangle((x_pts[i]-w*0.5, 8.5), w, (safe_float(v[1])/norm)*2.5, color=TEAL))
-                    ax.add_patch(Rectangle((x_pts[i]+w*0.5, 8.5), w, (safe_float(v[2])/norm)*2.5, color=RED))
-                    ax.text(x_pts[i], 8.2, str(idx)[:4], ha='center', fontsize=9, color='#666666')
+        try:
+            if fin is not None and not fin.empty:
+                df = fin.T if fin.shape[0] < fin.shape[1] else fin
+                r = df.get('Total Revenue', pd.Series(0, index=df.index))
+                n = df.get('Net Income', df.get('Net Income Common Stockholders', pd.Series(0, index=df.index)))
+                f = df.get('Free Cash Flow', df.get('Operating Cash Flow', pd.Series(0, index=df.index)))
+                
+                df_plot = pd.DataFrame({'R': r, 'N': n, 'F': f}).replace([np.inf, -np.inf], 0).fillna(0).head(7)[::-1]
+                if not df_plot.empty:
+                    x_pts = np.linspace(0.8, 6.2, len(df_plot))
+                    w, norm = 0.14, (df_plot['R'].max() if df_plot['R'].max() > 0 else 1)
+                    for i, (idx, v) in enumerate(df_plot.iterrows()):
+                        ax.add_patch(Rectangle((x_pts[i]-w*1.5, 8.5), w, (safe_float(v['R'])/norm)*2.5, color=BLACK))
+                        ax.add_patch(Rectangle((x_pts[i]-w*0.5, 8.5), w, (safe_float(v['N'])/norm)*2.5, color=TEAL))
+                        ax.add_patch(Rectangle((x_pts[i]+w*0.5, 8.5), w, (safe_float(v['F'])/norm)*2.5, color=RED))
+                        ax.text(x_pts[i], 8.2, str(idx)[:4], ha='center', fontsize=9, color='#666666')
+        except: pass # Move on if bars fail to avoid "Render fail"
 
         # --- MARGINS ---
         ax.text(7.5, 11.2, "Margins", fontsize=22, fontweight='bold', color=TEAL)
         draw_ring(ax, 7.5, 10.4, safe_float(info.get('grossMargins', 0))*100, "Gross", TEAL)
         draw_ring(ax, 7.5, 9.5, safe_float(info.get('ebitdaMargins', 0))*100, "EBIT", RED)
         draw_ring(ax, 7.5, 8.6, safe_float(info.get('profitMargins', 0))*100, "Net", TEAL)
-        fcf_m = (safe_float(info.get('freeCashflow', 0))/safe_float(info.get('totalRevenue', 1)))*100
+        rev = safe_float(info.get('totalRevenue', 1))
+        fcf_m = (safe_float(info.get('freeCashflow', 0))/rev)*100 if rev != 0 else 0
         draw_ring(ax, 7.5, 7.7, fcf_m, "FCF", RED)
 
         # --- BULL CASE & FAIR VALUE ---
@@ -80,7 +82,8 @@ def create_exact_infographic(ticker, row, info, fin):
         ax.add_patch(tag); ax.add_patch(Circle((7.4, 3.2), 0.1, color=BG_WHITE))
         ax.text(8.4, 4.0, f"${row.Price}", ha='center', fontweight='black', fontsize=45)
         t_mean = safe_float(info.get('targetMeanPrice', row.Price))
-        ax.text(8.4, 3.1, f"{((t_mean/row.Price)-1)*100:.0f}% OFF", ha='center', fontweight='bold', bbox=dict(facecolor='white', edgecolor='none'))
+        off_pct = ((t_mean/row.Price)-1)*100 if row.Price != 0 else 0
+        ax.text(8.4, 3.1, f"{off_pct:.0f}% OFF", ha='center', fontweight='bold', bbox=dict(facecolor='white', edgecolor='none'))
         ax.text(8.4, 1.1, f"${t_mean:.1f} Consensus", ha='center', fontsize=10, fontweight='bold')
 
         # --- TIMESTAMP ---
@@ -89,17 +92,15 @@ def create_exact_infographic(ticker, row, info, fin):
         buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=300, bbox_inches='tight'); buf.seek(0); plt.close()
         return buf
     except Exception as e:
-        print(f"❌ Error rendering {ticker}: {e}"); return None
+        print(f"❌ Critical Render Fail {ticker}: {e}"); return None
 
 def run_scanner():
     creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
     gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
     sh = gc.open("Stock Scanner")
     
-    # Fetch and clean symbols
     wiki_table = pd.read_html(urlopen(Request('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', headers={'User-Agent': 'Mozilla/5.0'})))[0]
     tickers = [str(t).strip().replace('.', '-') for t in wiki_table['Symbol'].tolist()]
-    
     data = yf.download(tickers + ["SPY"], period="5y", group_by='ticker', progress=False)
     
     results = []
@@ -123,11 +124,7 @@ def run_scanner():
 
     for i, (idx, row) in enumerate(df_top.iterrows()):
         t_obj = yf.Ticker(row.Stock)
-        # Use .financials safely
-        try: fin_data = t_obj.financials
-        except: fin_data = None
-        
-        img = create_exact_infographic(row.Stock, row, t_obj.info, fin_data)
+        img = create_exact_infographic(row.Stock, row, t_obj.info, t_obj.financials)
         if img and i < 5:
             requests.post(f"https://api.telegram.org/bot{os.environ.get('TELEGRAM_BOT_TOKEN')}/sendPhoto", 
                           files={'photo': ('img.png', img, 'image/png')}, 
