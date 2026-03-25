@@ -19,8 +19,8 @@ GRAY_BG = '#e0e0e0'; BLACK = '#000000'; RED = '#ff4444'; GREEN = '#009933'
 def safe_float(val):
     try:
         res = float(val)
-        return 0 if np.isnan(res) or np.isinf(res) else res
-    except: return 0
+        return 0.0 if np.isnan(res) or np.isinf(res) else res
+    except: return 0.0
 
 def draw_ring(ax, x, y, pct, label, color, size=0.22):
     pct_clamped = max(min(safe_float(pct), 100), 0)
@@ -37,54 +37,38 @@ def create_exact_infographic(ticker, row, info, fin):
 
         # --- HEADER ---
         ax.text(0.5, 13.0, ticker, fontsize=75, fontweight='black', color=BLACK)
-        ax.text(0.5, 12.4, f"{info.get('sector', 'N/A')} | {info.get('industry', 'N/A')}", fontsize=14, color='#555555')
-        ax.text(9.5, 13.2, f"${info.get('marketCap', 0)/1e9:.1f}B Market Cap", ha='right', fontsize=20, fontweight='bold')
+        ax.text(9.5, 13.2, f"${safe_float(info.get('marketCap', 0))/1e9:.1f}B Market Cap", ha='right', fontsize=20, fontweight='bold')
         ax.text(9.5, 12.7, f"{row['5Y_Perf']:.0f}% 5Y", ha='right', fontsize=18, color=GREEN if row['5Y_Perf']>0 else RED)
         ax.text(9.5, 12.2, f"{row['YTD_Perf']:.0f}% YTD", ha='right', fontsize=18, color=GREEN if row['YTD_Perf']>0 else RED)
 
-        # --- FINANCIAL BARS ---
-        if not fin.empty:
+        # --- FINANCIAL BARS (RESILIENT LOGIC) ---
+        ax.text(0.8, 11.2, "● Revenue  ● Net Income  ● FCF", fontsize=10, color='#666666')
+        if fin is not None and not fin.empty:
             df = fin.T if fin.shape[0] < fin.shape[1] else fin
             r = df.get('Total Revenue', pd.Series(0, index=df.index))
             n = df.get('Net Income', pd.Series(0, index=df.index))
             f = df.get('Free Cash Flow', df.get('Operating Cash Flow', pd.Series(0, index=df.index)))
-            df_plot = pd.DataFrame({'R': r, 'N': n, 'F': f}).head(7)[::-1] / 1e6
-            x_pts = np.linspace(0.8, 6.2, len(df_plot))
-            w = 0.14
-            norm = df_plot['R'].max() if df_plot['R'].max() > 0 else 1
-            for i, (idx, v) in enumerate(df_plot.iterrows()):
-                ax.add_patch(Rectangle((x_pts[i]-w*1.5, 8.5), w, (v[0]/norm)*2.5, color=BLACK))
-                ax.add_patch(Rectangle((x_pts[i]-w*0.5, 8.5), w, (v[1]/norm)*2.5, color=TEAL))
-                ax.add_patch(Rectangle((x_pts[i]+w*0.5, 8.5), w, (v[2]/norm)*2.5, color=RED))
-                ax.text(x_pts[i], 8.2, str(idx)[:4], ha='center', fontsize=9, color='#666666')
-        ax.text(0.8, 11.2, "● Revenue  ● Net Income  ● FCF", fontsize=10, color='#666666')
+            
+            df_plot = pd.DataFrame({'R': r, 'N': n, 'F': f}).replace([np.inf, -np.inf], 0).fillna(0).head(7)[::-1]
+            if not df_plot.empty:
+                x_pts = np.linspace(0.8, 6.2, len(df_plot))
+                w = 0.14
+                norm = df_plot['R'].max() if df_plot['R'].max() > 0 else 1
+                for i, (idx, v) in enumerate(df_plot.iterrows()):
+                    ax.add_patch(Rectangle((x_pts[i]-w*1.5, 8.5), w, (safe_float(v[0])/norm)*2.5, color=BLACK))
+                    ax.add_patch(Rectangle((x_pts[i]-w*0.5, 8.5), w, (safe_float(v[1])/norm)*2.5, color=TEAL))
+                    ax.add_patch(Rectangle((x_pts[i]+w*0.5, 8.5), w, (safe_float(v[2])/norm)*2.5, color=RED))
+                    ax.text(x_pts[i], 8.2, str(idx)[:4], ha='center', fontsize=9, color='#666666')
 
         # --- MARGINS ---
         ax.text(7.5, 11.2, "Margins", fontsize=22, fontweight='bold', color=TEAL)
-        draw_ring(ax, 7.5, 10.4, info.get('grossMargins', 0)*100, "Gross", TEAL)
-        draw_ring(ax, 7.5, 9.5, info.get('ebitdaMargins', 0)*100, "EBIT", RED)
-        draw_ring(ax, 7.5, 8.6, info.get('profitMargins', 0)*100, "Net", TEAL)
-        fcf_m = (info.get('freeCashflow', 0)/info.get('totalRevenue', 1))*100 if info.get('totalRevenue', 1) > 0 else 0
+        draw_ring(ax, 7.5, 10.4, safe_float(info.get('grossMargins', 0))*100, "Gross", TEAL)
+        draw_ring(ax, 7.5, 9.5, safe_float(info.get('ebitdaMargins', 0))*100, "EBIT", RED)
+        draw_ring(ax, 7.5, 8.6, safe_float(info.get('profitMargins', 0))*100, "Net", TEAL)
+        fcf_m = (safe_float(info.get('freeCashflow', 0))/safe_float(info.get('totalRevenue', 1)))*100
         draw_ring(ax, 7.5, 7.7, fcf_m, "FCF", RED)
 
-        # --- KEY RATIOS ---
-        ax.text(0.5, 7.2, "Key ratios", fontsize=20, fontweight='bold', color=ORANGE_TAG)
-        draw_ring(ax, 0.7, 6.4, info.get('payoutRatio', 0)*100, "BuyBack", TEAL, size=0.2)
-        ax.text(0.5, 5.6, f"• {info.get('returnOnAssets', 0)*100:.1f}% ROIC", fontsize=13)
-        ax.text(0.5, 5.1, f"• ${info.get('totalCash', 0)/1e9:.1f}B Cash", fontsize=13)
-        ax.text(0.5, 4.6, f"• {info.get('trailingPE', 0):.1f} P/E", fontsize=13)
-
-        # --- GROWTH ESTIMATES ---
-        ax.text(3.8, 7.2, "2028 Growth Estimates", fontsize=20, fontweight='bold', color=BLACK)
-        draw_ring(ax, 4.0, 6.4, info.get('revenueGrowth', 0)*100, "Rev CAGR", RED, size=0.2)
-        draw_ring(ax, 4.0, 5.5, info.get('earningsGrowth', 0)*100, "EPS CAGR", RED, size=0.2)
-
-        # --- GROWTH SINCE 2022 ---
-        ax.text(0.5, 3.5, "Growth Since 2022", fontsize=18, fontweight='bold', color=GREEN)
-        draw_ring(ax, 0.7, 2.7, row.RS_Rating, "Revenue", TEAL, size=0.16)
-        draw_ring(ax, 0.7, 2.0, row.RVOL*40, "EPS", TEAL, size=0.16)
-
-        # --- BULL CASE ---
+        # --- BULL CASE & FAIR VALUE ---
         ax.text(3.8, 3.5, "Bull Case", fontsize=18, fontweight='bold', color=BLACK)
         ax.text(3.8, 2.3, "• AI Inflection\n• Momentum Lead\n• Sector Strength", fontsize=12)
         ax.add_patch(Rectangle((3.8, 3.8), 2.0, 0.3, color=TEAL, alpha=0.9))
@@ -95,7 +79,7 @@ def create_exact_infographic(ticker, row, info, fin):
         tag = Polygon([[7.0, 5.8], [9.8, 5.8], [9.8, 0.5], [7.8, 0.5], [7.0, 3.2]], color=ORANGE_TAG)
         ax.add_patch(tag); ax.add_patch(Circle((7.4, 3.2), 0.1, color=BG_WHITE))
         ax.text(8.4, 4.0, f"${row.Price}", ha='center', fontweight='black', fontsize=45)
-        t_mean = info.get('targetMeanPrice', row.Price)
+        t_mean = safe_float(info.get('targetMeanPrice', row.Price))
         ax.text(8.4, 3.1, f"{((t_mean/row.Price)-1)*100:.0f}% OFF", ha='center', fontweight='bold', bbox=dict(facecolor='white', edgecolor='none'))
         ax.text(8.4, 1.1, f"${t_mean:.1f} Consensus", ha='center', fontsize=10, fontweight='bold')
 
@@ -105,19 +89,21 @@ def create_exact_infographic(ticker, row, info, fin):
         buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=300, bbox_inches='tight'); buf.seek(0); plt.close()
         return buf
     except Exception as e:
-        print(f"❌ Render fail {ticker}: {e}"); return None
+        print(f"❌ Error rendering {ticker}: {e}"); return None
 
 def run_scanner():
     creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
     gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
     sh = gc.open("Stock Scanner")
     
-    tickers = pd.read_html(urlopen(Request('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', headers={'User-Agent': 'Mozilla/5.0'})))[0]['Symbol'].tolist()
-    formatted = [t.replace('.', '-') for t in tickers]
-    data = yf.download(formatted + ["SPY"], period="5y", group_by='ticker', progress=False)
+    # Fetch and clean symbols
+    wiki_table = pd.read_html(urlopen(Request('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', headers={'User-Agent': 'Mozilla/5.0'})))[0]
+    tickers = [str(t).strip().replace('.', '-') for t in wiki_table['Symbol'].tolist()]
+    
+    data = yf.download(tickers + ["SPY"], period="5y", group_by='ticker', progress=False)
     
     results = []
-    for t in formatted:
+    for t in tickers:
         try:
             df = data[t].dropna()
             if len(df) < 252: continue
@@ -132,20 +118,21 @@ def run_scanner():
             })
         except: continue
 
-    df_full = pd.DataFrame(results).sort_values('Score', ascending=False).replace([np.inf, -np.inf], np.nan).fillna(0)
+    df_full = pd.DataFrame(results).sort_values('Score', ascending=False).replace([np.inf, -np.inf], 0).fillna(0)
     df_top = df_full.head(10).copy()
 
-    # --- TELEGRAM SENDER ---
     for i, (idx, row) in enumerate(df_top.iterrows()):
         t_obj = yf.Ticker(row.Stock)
-        img = create_exact_infographic(row.Stock, row, t_obj.info, t_obj.financials)
+        # Use .financials safely
+        try: fin_data = t_obj.financials
+        except: fin_data = None
+        
+        img = create_exact_infographic(row.Stock, row, t_obj.info, fin_data)
         if img and i < 5:
-            r = requests.post(f"https://api.telegram.org/bot{os.environ.get('TELEGRAM_BOT_TOKEN')}/sendPhoto", 
-                              files={'photo': ('img.png', img, 'image/png')}, 
-                              data={'chat_id': os.environ.get('TELEGRAM_CHAT_ID'), 'caption': f"🎯 **APEX PICK: ${row.Stock}**", 'parse_mode': 'Markdown'})
-            print(f"Telegram status for {row.Stock}: {r.status_code}")
+            requests.post(f"https://api.telegram.org/bot{os.environ.get('TELEGRAM_BOT_TOKEN')}/sendPhoto", 
+                          files={'photo': ('img.png', img, 'image/png')}, 
+                          data={'chat_id': os.environ.get('TELEGRAM_CHAT_ID'), 'caption': f"🎯 **APEX PICK: ${row.Stock}**", 'parse_mode': 'Markdown'})
 
-    # --- SHEETS UPDATER ---
     for s_name in ["Core Screener", "Summary"]:
         ws = sh.worksheet(s_name)
         df = df_full if s_name == "Core Screener" else df_top
