@@ -14,10 +14,9 @@ from urllib.request import Request, urlopen
 
 # --- 1. AUTHENTICATION ---
 def setup_ai():
-    # Explicitly configure the API Key
     genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-    # FIX: Use 'gemini-1.5-flash-latest' to bypass version-specific 404s
-    return genai.GenerativeModel('gemini-1.5-flash-latest')
+    # UPDATED: Using the 2.0 Flash model which is the 2026 production standard
+    return genai.GenerativeModel('gemini-2.0-flash')
 
 def get_gspread_client():
     creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
@@ -32,7 +31,6 @@ def get_bespoke_summary(ticker, row):
         t_obj = yf.Ticker(ticker)
         info = t_obj.info
         
-        # Financial metrics
         g_margin = info.get('grossMargins', 0) * 100
         fcf_val = info.get('freeCashflow', 0)
         rev_val = info.get('totalRevenue', 1)
@@ -46,15 +44,14 @@ def get_bespoke_summary(ticker, row):
             f"MARKET DATA: Price ${row.Price}, RS Rating {row.RS_Rating}, RVOL {row.RVOL}x, ADR {row['ADR%']}%.\n"
             f"FINANCIALS: Gross Margin {g_margin:.1f}%, FCF Margin {fcf_margin:.1f}%, Cash ${cash:.2f}B, P/E {pe}.\n"
             f"BUSINESS CONTEXT: {biz}\n"
-            "FORMAT (Bullet points only, no intro text):\n"
+            "FORMAT (Bullet points only):\n"
             "- Industry/Niche: [Brief description]\n"
-            "- Institutional Context: [Why the RVOL/RS matters here]\n"
-            "- Growth/Inflection: [Business driver for this breakout]\n"
-            "- Bull Case: [Specific strategic advantage]\n"
-            "- Verdict: [1-sentence trading conviction]"
+            "- Institutional Context: [Context on volume/RS]\n"
+            "- Growth/Inflection: [Business driver]\n"
+            "- Bull Case: [Strategic advantage]\n"
+            "- Verdict: [1-sentence conviction]"
         )
         
-        # Calling the generation
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
@@ -96,7 +93,7 @@ def send_telegram_alert(ticker, row, history_df, thesis):
 
 # --- 4. DATA INGESTION ---
 def get_tickers():
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
     req_sp = Request('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', headers=headers)
     with urlopen(req_sp) as response:
         sp500 = pd.read_html(io.BytesIO(response.read()))[0]['Symbol'].tolist()
@@ -114,6 +111,7 @@ def run_scanner():
     sh = gc.open("Stock Scanner")
     
     tickers = get_tickers()
+    # Download data with a focus on clean ticker handling
     data = yf.download(tickers + ["SPY"], period="1y", group_by='ticker', progress=False)
     spy_close = data['SPY']['Close']
     
