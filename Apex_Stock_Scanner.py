@@ -20,7 +20,7 @@ def safe_float(val):
     except: return 0.0
 
 def draw_ring(ax, x, y, pct, label, color, size=0.18):
-    pct_val = max(min(safe_float(pct), 150), 0) # Allow up to 150% for high growth
+    pct_val = max(min(safe_float(pct), 150), 0)
     ax.add_patch(Wedge((x, y), size, 0, 360, width=size*0.3, color=GRAY_BG, zorder=2))
     ax.add_patch(Wedge((x, y), size, 90, 90-(min(pct_val, 100)*3.6), width=size*0.3, color=color, zorder=3))
     ax.text(x + size + 0.12, y, f"{int(pct_val)}% {label}", color=BLACK, va='center', fontweight='bold', fontsize=9)
@@ -33,11 +33,11 @@ def create_master_infographic(ticker, row, info, fin, cf):
 
         # --- HEADER ---
         ax.text(0.5, 12.8, ticker, fontsize=95, fontweight='black', color='#ff4b4b')
-        ax.text(9.5, 13.2, f"${safe_float(info.get('marketCap'))/1e9:.1f}B Market Cap", ha='right', fontsize(22), fontweight='bold')
+        ax.text(9.5, 13.2, f"${safe_float(info.get('marketCap'))/1e9:.1f}B Market Cap", ha='right', fontsize=22, fontweight='bold')
         ax.text(9.5, 12.6, f"{row['5Y_Perf']:.0f}% 5Y", ha='right', fontsize=20, fontweight='bold')
         ax.text(9.5, 12.1, f"{row['YTD_Perf']:.0f}% YTD", ha='right', fontsize=20, fontweight='bold')
 
-        # --- 1. FINANCIAL BARS (CENTER) ---
+        # --- 1. FINANCIAL BARS ---
         ax.text(3.5, 11.2, "● Revenue  ● Net Income  ● FCF", fontsize=10, color='#666666')
         try:
             df_f = fin.T if fin.shape[0] < fin.shape[1] else fin
@@ -84,7 +84,7 @@ def create_master_infographic(ticker, row, info, fin, cf):
         ax.add_patch(FancyBboxPatch((6.0, 4.1), 1.0, 0.4, boxstyle="round,pad=0.1", color=RED))
         ax.text(5.5, 4.7, "Fair Value Bar", fontweight='bold', ha='center', fontsize=10)
 
-        # --- 6. GROWTH SINCE 2022 (BOTTOM LEFT) ---
+        # --- 6. GROWTH SINCE 2022 ---
         ax.text(0.5, 2.8, "Growth Since 2022", fontsize=20, fontweight='bold', color=GREEN)
         draw_ring(ax, 0.7, 2.2, 81, "Revenue", TEAL)
         draw_ring(ax, 0.7, 1.5, 145, "EPS", TEAL)
@@ -94,19 +94,15 @@ def create_master_infographic(ticker, row, info, fin, cf):
         ax.text(4.0, 3.2, "Bull Case", fontsize=22, fontweight='bold')
         ax.text(4.0, 2.0, "• AI\n• Agentic AI\n• The Platform", fontsize=15)
 
-        # --- 8. PRICE TAG (ORANGE) ---
+        # --- 8. PRICE TAG ---
         tag = Polygon([[7.5, 6.5], [9.8, 6.5], [9.8, 0.2], [7.8, 0.2], [7.5, 3.5]], color=ORANGE_TAG)
         ax.add_patch(tag); ax.add_patch(Circle((7.8, 3.5), 0.15, color=BG_WHITE))
         ax.text(8.7, 5.5, "Price", ha='center', fontsize=18, fontweight='bold')
         ax.text(8.7, 4.6, f"${row.Price:.0f}", ha='center', fontsize=55, fontweight='black')
         ax.text(8.7, 3.6, "-14% OFF", ha='center', fontweight='bold', bbox=dict(facecolor='white', edgecolor='none'))
-        ax.text(8.7, 2.6, "WS Price Targets", ha='center', fontweight='bold', fontsize=12)
-        ax.text(8.7, 2.0, "$12 Low", ha='center', fontweight='bold')
-        ax.text(8.7, 1.4, "$17 High", ha='center', fontweight='bold')
-        ax.text(8.7, 0.8, "$14 Consensus", ha='center', fontweight='bold')
-
-        # FOOTER
-        ax.text(5.0, 0.3, "Global Equity Briefing  23. March 2026", ha='center', fontsize=10, color='#666666')
+        ax.text(8.7, 2.0, "$12 Low", ha='center', fontweight='bold', fontsize=12)
+        ax.text(8.7, 1.4, "$17 High", ha='center', fontweight='bold', fontsize=12)
+        ax.text(8.7, 0.8, "$14 Consensus", ha='center', fontweight='bold', fontsize=12)
 
         buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=300); buf.seek(0); plt.close()
         return buf
@@ -135,16 +131,20 @@ def run_scanner():
 
     df_full = pd.DataFrame(res).sort_values('Score', ascending=False).replace([np.inf, -np.inf], 0).fillna(0)
     
-    # --- MANDATORY SHEETS UPDATE ---
+    # --- GOOGLE SHEETS UPDATES (MANDATORY START) ---
     for sn in ["Core Screener", "Summary"]:
         ws = sh.worksheet(sn)
         out = df_full if sn == "Core Screener" else df_full.head(10)
         ws.clear(); ws.update([out.columns.tolist()] + out.astype(str).values.tolist())
 
-    # --- TELEGRAM RENDERING ---
+    # --- TELEGRAM IMAGES ---
     for i, (idx, r) in enumerate(df_full.head(5).iterrows()):
         to = yf.Ticker(r.Stock)
         img = create_master_infographic(r.Stock, r, to.info, to.financials, to.cashflow)
-        if img: requests.post(f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendPhoto", files={'photo': ('i.png', img)}, data={'chat_id': os.environ['TELEGRAM_CHAT_ID']})
+        if img:
+            requests.post(f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendPhoto", 
+                          files={'photo': ('i.png', img)}, 
+                          data={'chat_id': os.environ['TELEGRAM_CHAT_ID']})
 
-if __name__ == "__main__": run_scanner()
+if __name__ == "__main__":
+    run_scanner()
