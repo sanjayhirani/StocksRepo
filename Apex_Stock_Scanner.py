@@ -4,7 +4,7 @@ import numpy as np
 from urllib.request import Request, urlopen
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import google.generativeai as genai
+from google import genai
 from datetime import datetime
 import matplotlib.pyplot as plt
 import io
@@ -13,15 +13,13 @@ import os
 import json
 
 # --- SECRETS & AUTH ---
-# This block allows the script to run on GitHub Actions without a local JSON file
 google_creds_json = json.loads(os.environ.get("GOOGLE_CREDS"))
 scope = ["https://spreadsheets.google.com/feeds","https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_dict(google_creds_json, scope)
 client = gspread.authorize(creds)
 
-# Configure Gemini AI
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-ai_model = genai.GenerativeModel('gemini-1.5-flash')
+# New Google GenAI Client
+client_ai = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 # --- SETTINGS ---
 RISK_PER_TRADE_USD = 500
@@ -45,12 +43,11 @@ def format_sheet(sheet_obj):
 def get_ai_thesis(ticker, row):
     prompt = f"Act as an elite hedge fund analyst. Ticker {ticker} has an RS Rating of {row.RS_Rating}, RVOL of {row.RVOL}, and is in a Squeeze. In 2 short sentences, explain why this institutional setup is a high-conviction buy at the top."
     try:
-        response = ai_model.generate_content(prompt)
+        response = client_ai.models.generate_content(model='gemini-1.5-flash', contents=prompt)
         return response.text
     except: return "Momentum leader with institutional volume confirmation."
 
 def send_telegram_alert(ticker, row, history_df):
-    # Create Mobile-Optimized Chart
     plt.style.use('dark_background')
     fig, ax = plt.subplots(figsize=(10, 6))
     history_df['Close'].tail(50).plot(ax=ax, color='#00ff00', lw=2.5)
@@ -62,7 +59,6 @@ def send_telegram_alert(ticker, row, history_df):
     buf.seek(0)
     plt.close()
 
-    # Dispatch to Phone
     thesis = get_ai_thesis(ticker, row)
     caption = f"🚀 **APEX ALERT: {ticker}**\n\n" \
               f"**Price:** ${row.Price}\n" \
@@ -76,14 +72,20 @@ def send_telegram_alert(ticker, row, history_df):
     requests.post(url, files=files, data=data)
 
 # --- 1. DATA INGESTION ---
+print("📡 Monitoring the Leaders...")
 indices = [{'url': 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', 'idx': 0},
            {'url': 'https://en.wikipedia.org/wiki/Nasdaq-100', 'idx': 4}]
 
 sector_map = {}
 for item in indices:
-    df_wiki = pd.read_html(urlopen(Request(item['url'], headers={'User-Agent': 'Mozilla/5.0'})).read())[item['idx']]
-    t_col = [c for c in df_wiki.columns if 'Symbol' in str(c) or 'Ticker' in str(c)][0]
-    for _, row in df_wiki.iterrows(): sector_map[str(row[t_col]).replace('.', '-')] = "Mapped"
+    try:
+        # Use lxml explicitly to avoid confusion
+        req = Request(item['url'], headers={'User-Agent': 'Mozilla/5.0'})
+        df_wiki = pd.read_html(urlopen(req).read(), flavor='lxml')[item['idx']]
+        t_col = [c for c in df_wiki.columns if 'Symbol' in str(c) or 'Ticker' in str(c)][0]
+        for _, row in df_wiki.iterrows(): sector_map[str(row[t_col]).replace('.', '-')] = "Mapped"
+    except Exception as e:
+        print(f"Error scraping {item['url']}: {e}")
 
 full_ticker_list = list(sector_map.keys())
 all_data = yf.download(full_ticker_list + ["SPY"], period="2y", auto_adjust=True, progress=False)
@@ -100,11 +102,9 @@ for t in full_ticker_list:
 
         close, curr_price = df['Close'], df['Close'].iloc[-1]
         
-        # Trend Template
         sma_50, sma_150, sma_200 = close.rolling(50).mean().iloc[-1], close.rolling(150).mean().iloc[-1], close.rolling(200).mean().iloc[-1]
         if not (curr_price > sma_150 > sma_200) or curr_price < sma_50: continue
 
-        # RS & RVOL
         rs_line = (close / spy_close)
         rs_rating = (rs_line.iloc[-1] / rs_line.rolling(200).mean().iloc[-1] - 1) * 100
         if rs_rating < 0: continue
@@ -112,12 +112,10 @@ for t in full_ticker_list:
         rvol = df['Volume'].iloc[-1] / df['Volume'].rolling(20).mean().iloc[-1]
         rs_visual = "📈 BREAKOUT" if (rs_line.iloc[-1] > rs_line.iloc[-10]) else "📉 STALLING"
 
-        # Squeeze
         sma_20, std_20 = close.rolling(20).mean(), close.rolling(20).std()
         tr = pd.concat([df['High']-df['Low'], abs(df['High']-close.shift()), abs(df['Low']-close.shift())], axis=1).max(axis=1)
         is_sq = ((sma_20 - (2*std_20)) > (sma_20 - (1.5*tr.rolling(20).mean()))).iloc[-1]
 
-        # Trade Levels
         buy_trigger = df['High'].tail(5).max() * 1.002
         stop_loss = curr_price - (tr.rolling(20).mean().iloc[-1] * 1.5)
         shares = int(RISK_PER_TRADE_USD / (buy_trigger - stop_loss)) if (buy_trigger - stop_loss) > 0 else 0
@@ -134,14 +132,11 @@ for t in full_ticker_list:
 df_all = pd.DataFrame(master_data).sort_values(by='Score', ascending=False)
 if not df_all.empty:
     sheet_core.clear(); sheet_core.update([df_all.head(100).columns.tolist()] + df_all.head(100).values.tolist()); format_sheet(sheet_core)
-    
     df_sum = df_all[df_all['Squeeze'] == "YES"].head(10).copy()
     if not df_sum.empty:
         sheet_summary.clear(); sheet_summary.update([df_sum.columns.tolist()] + df_sum.values.tolist()); format_sheet(sheet_summary)
-        
-        # Trigger Top 3 Alerts
         for _, row in df_sum.head(3).iterrows():
             ticker_hist = yf.download(row.Stock, period='1y', progress=False)
             send_telegram_alert(row.Stock, row, ticker_hist)
 
-print(f"🏁 Apex Scan Complete. Check Telegram for the Top 3 Leaders.")
+print(f"🏁 Apex Scan Complete. Focus on the high RS Rating leaders.")
