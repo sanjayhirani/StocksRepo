@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from google import genai
+import google.generativeai as genai  # Switched to the stable library
 import matplotlib.pyplot as plt
 import io
 import requests
@@ -13,9 +13,9 @@ from datetime import datetime
 from urllib.request import Request, urlopen
 
 # --- 1. AUTHENTICATION ---
-def get_client_ai():
-    # Force the latest Client initialization
-    return genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+def setup_ai():
+    genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+    return genai.GenerativeModel('gemini-1.5-flash')
 
 def get_gspread_client():
     creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
@@ -25,19 +25,19 @@ def get_gspread_client():
 
 # --- 2. THE "INSTITUTIONAL" ANALYST ---
 def get_bespoke_summary(ticker, row):
-    client_ai = get_client_ai()
+    model = setup_ai()
     try:
         t_obj = yf.Ticker(ticker)
         info = t_obj.info
         
-        # Pull fundamental data for the briefing
+        # Financial metrics
         g_margin = info.get('grossMargins', 0) * 100
         fcf_val = info.get('freeCashflow', 0)
         rev_val = info.get('totalRevenue', 1)
         fcf_margin = (fcf_val / rev_val) * 100 if fcf_val else 0
         cash = info.get('totalCash', 0) / 1e9
         pe = info.get('trailingPE', 'N/A')
-        biz = info.get('longBusinessSummary', 'Business profile data currently unavailable.')[:600]
+        biz = info.get('longBusinessSummary', 'Business data unavailable.')[:600]
 
         prompt = (
             f"Act as a Lead Equity Researcher. Create a 'One-Pager' briefing for {ticker}.\n"
@@ -52,11 +52,7 @@ def get_bespoke_summary(ticker, row):
             "- Verdict: [1-sentence trading conviction]"
         )
         
-        # FIX: Using the Fully Qualified Name 'models/gemini-1.5-flash' to resolve 404
-        response = client_ai.models.generate_content(
-            model='models/gemini-1.5-flash', 
-            contents=prompt
-        )
+        response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
         print(f"⚠️ AI Error for {ticker}: {e}")
@@ -128,7 +124,6 @@ def run_scanner():
             curr_p = df['Close'].iloc[-1]
             sma50, sma200 = df['Close'].rolling(50).mean().iloc[-1], df['Close'].rolling(200).mean().iloc[-1]
             
-            # Filter: Bullish Trend
             if not (curr_p > sma50 > sma200): continue
             
             rs_line = df['Close'] / spy_close
@@ -162,6 +157,7 @@ def run_scanner():
             thesis = get_bespoke_summary(row.Stock, row)
             theses.append(thesis)
             if i < 3:
+                # Top 3 alerts
                 send_telegram_alert(row.Stock, row, yf.download(row.Stock, period='1y', progress=False), thesis)
         df_sum['AI_Thesis'] = theses
     
