@@ -4,6 +4,7 @@ import numpy as np
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import matplotlib.pyplot as plt
+from matplotlib.patches import Wedge, Rectangle, Polygon, Circle
 import io
 import requests
 import os
@@ -11,144 +12,112 @@ import json
 from datetime import datetime
 from urllib.request import Request, urlopen
 
-# --- 1. AUTHENTICATION ---
-def get_gspread_client():
-    creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    return gspread.authorize(creds)
+# --- CONSTANTS & STYLE ---
+BG_COLOR = '#0b0e11'
+CYAN = '#00d4ff'   
+GREEN = '#00ff88'  
+RED = '#ff4444'    
+ORANGE = '#ff9500' 
+TEXT_COLOR = '#ffffff'
 
-# --- 2. DATA ENGINE (The "Exact" Metrics) ---
-def get_equity_briefing_data(ticker, row):
+# --- 1. VISUAL ENGINE (The "Exact" Infographic) ---
+def draw_donut(ax, x, y, pct, label, color, size=0.3):
+    pct = max(min(float(pct or 0), 100), 0)
+    ax.add_patch(Wedge((x, y), size, 0, 360, width=size*0.3, color='#2c2e33', zorder=2))
+    ax.add_patch(Wedge((x, y), size, 90, 90-(pct*3.6), width=size*0.3, color=color, zorder=3))
+    ax.text(x + size + 0.15, y, f"{int(pct)}% {label}", color=TEXT_COLOR, fontsize=9, va='center', fontweight='bold')
+
+def draw_fair_value_bar(ax, x, y, upside_pct):
+    ax.add_patch(Rectangle((x, y), 2.5, 0.3, color=CYAN, alpha=0.6, rx=0.1))
+    ax.add_patch(Rectangle((x+1.25, y), 1.25, 0.3, color=RED, alpha=0.6, rx=0.1))
+    pos = x + 1.25 - (upside_pct / 40)
+    pos = max(min(pos, x+2.5), x)
+    ax.add_patch(Rectangle((pos, y-0.05), 0.08, 0.4, color=GREEN, zorder=5))
+    ax.text(x+1.25, y+0.45, "Fair Value Bar", color=TEXT_COLOR, ha='center', fontsize=9, fontweight='bold')
+
+def create_infographic(ticker, row, info, fin):
     try:
-        t_obj = yf.Ticker(ticker)
-        info = t_obj.info
+        fig = plt.figure(figsize=(10, 14), facecolor=BG_COLOR)
+        ax = fig.add_axes([0, 0, 1, 1], frameon=False)
+        ax.set_xlim(0, 10); ax.set_ylim(0, 14)
+        ax.set_xticks([]); ax.set_yticks([])
+
+        # Header Info
+        mcap = info.get('marketCap', 0) / 1e9
+        ax.text(0.5, 12.8, ticker, fontsize=55, color=TEXT_COLOR, fontweight='black')
+        ax.text(9.5, 13.0, f"${mcap:.1f}B Market Cap", fontsize=16, color=TEXT_COLOR, ha='right', fontweight='bold')
         
-        # Margins & Profitability
-        gross_margin = info.get('grossMargins', 0) * 100
-        ebit_margin = info.get('ebitdaMargins', 0) * 100
-        fcf_val = info.get('freeCashflow', 0)
-        rev_val = info.get('totalRevenue', 1)
-        fcf_margin = (fcf_val / rev_val) * 100 if fcf_val else 0
+        # Performance Indicators (Top Right)
+        ax.text(9.5, 12.4, f"{row['5Y_Perf']:.0f}% 5Y", fontsize=14, color=RED if row['5Y_Perf'] < 0 else GREEN, ha='right')
+        ax.text(9.5, 12.0, f"{row['YTD_Perf']:.0f}% YTD", fontsize=14, color=RED if row['YTD_Perf'] < 0 else GREEN, ha='right')
 
-        # Ratios & Balance Sheet
-        roa = info.get('returnOnAssets', 0) * 100 
-        cash = info.get('totalCash', 0) / 1e9
-        pe = info.get('trailingPE', 0)
-        fwd_pe = info.get('forwardPE', 0)
-        market_cap = info.get('marketCap', 0) / 1e9
-        
-        # Performance Data
-        hist_5y = t_obj.history(period="5y")
-        perf_5y = ((hist_5y['Close'].iloc[-1] / hist_5y['Close'].iloc[0]) - 1) * 100 if len(hist_5y) > 0 else 0
-        hist_ytd = t_obj.history(period="ytd")
-        perf_ytd = ((hist_ytd['Close'].iloc[-1] / hist_ytd['Close'].iloc[0]) - 1) * 100 if len(hist_ytd) > 0 else 0
-
-        # Analyst Targets
-        t_low = info.get('targetLowPrice', 0)
-        t_high = info.get('targetHighPrice', 0)
-        t_mean = info.get('targetMeanPrice', 0)
-        upside = ((t_mean / row.Price) - 1) * 100 if t_mean else 0
-
-        briefing = (
-            f"• **Market Cap:** ${market_cap:.1f}B | **5Y:** {perf_5y:.1f}% | **YTD:** {perf_ytd:.1f}%\n"
-            f"• **Margins:** {gross_margin:.1f}% Gross | {ebit_margin:.1f}% EBIT | {fcf_margin:.1f}% FCF\n"
-            f"• **Ratios:** {pe:.1f} P/E | {fwd_pe:.1f} Fwd | {roa:.1f}% ROA | ${cash:.1f}B Cash\n"
-            f"• **Wall St:** Low ${t_low} | High ${t_high} | Cons ${t_mean} ({upside:.1f}% Upside)"
-        )
-        return briefing
-    except Exception as e:
-        return f"Briefing Data Unavailable: {str(e)}"
-
-# --- 3. THE "EXACT" VISUAL DASHBOARD ---
-def send_telegram_alert(ticker, row, history_df, thesis):
-    try:
-        t_obj = yf.Ticker(ticker)
-        # Pull Annual Financials for the exact bar chart layout
-        fin = t_obj.financials.T
+        # Center: Revenue & Net Income Bars
         if not fin.empty:
-            # We want the last 4 full years
-            rev = fin.get('Total Revenue', pd.Series(dtype=float)).head(4)[::-1] / 1e9
-            net = fin.get('Net Income', pd.Series(dtype=float)).head(4)[::-1] / 1e9
-            years = [d.year for d in rev.index]
-        else:
-            rev, net, years = [], [], []
+            revs = fin.get('Total Revenue', pd.Series(dtype=float)).tail(5) / 1e9
+            ni = fin.get('Net Income', pd.Series(dtype=float)).tail(5) / 1e9
+            x_pos = np.linspace(0.8, 5.2, len(revs))
+            norm = revs.max() if revs.max() > 0 else 1
+            ax.bar(x_pos - 0.1, (revs/norm)*2, width=0.18, color='#ffffff', label='Rev')
+            ax.bar(x_pos + 0.1, (ni/norm)*2 + 0.4, width=0.18, color=CYAN, label='NI')
+            for i, y_label in enumerate(revs.index):
+                ax.text(x_pos[i], 8.2, str(y_label.year), color='#888888', ha='center', fontsize=9)
 
-        # Color Palette from Infographic
-        BG_COLOR = '#0b0e11'
-        CYAN = '#00d4ff'   # Revenue / Price
-        GREEN = '#00ff88'  # Net Income / Entry
-        RED = '#ff4444'    # Stop Loss
+        # Right Sidebar: Margins
+        ax.text(6.8, 11.2, "Margins", fontsize=18, color=CYAN, fontweight='bold')
+        draw_donut(ax, 6.8, 10.5, info.get('grossMargins', 0)*100, "Gross", CYAN)
+        draw_donut(ax, 6.8, 9.6, info.get('ebitdaMargins', 0)*100, "EBIT", ORANGE)
+        draw_donut(ax, 6.8, 8.7, info.get('profitMargins', 0)*100, "Net", CYAN)
+        draw_donut(ax, 6.8, 7.8, (info.get('freeCashflow', 0)/info.get('totalRevenue', 1))*100, "FCF", RED)
 
-        plt.style.use('dark_background')
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 13), gridspec_kw={'height_ratios': [1.8, 1]})
-        fig.patch.set_facecolor(BG_COLOR)
+        # Key Ratios (Bottom Left)
+        ax.text(0.5, 7.2, "Key ratios", fontsize=18, color=ORANGE, fontweight='bold')
+        draw_donut(ax, 0.8, 6.5, info.get('returnOnAssets', 0)*100, "ROA", ORANGE, size=0.25)
+        ax.text(0.5, 5.7, f"• ${info.get('totalCash', 0)/1e9:.1f}B Cash", color=TEXT_COLOR, fontsize=12)
+        ax.text(0.5, 5.3, f"• {info.get('trailingPE', 0):.1f} P/E", color=TEXT_COLOR, fontsize=12)
+        ax.text(0.5, 4.9, f"• {info.get('payoutRatio', 0)*100:.1f}% Buyback/Div", color=TEXT_COLOR, fontsize=12)
 
-        # PANEL 1: Price Action
-        prices = history_df['Close'].tail(90)
-        ax1.set_facecolor(BG_COLOR)
-        ax1.plot(prices.index, prices, color=CYAN, lw=3.5, label='Price Action')
-        ax1.axhline(y=row.Buy_Trigger, color=GREEN, ls='--', lw=2.5, label=f'ENTRY ${row.Buy_Trigger}')
-        ax1.axhline(y=row.Stop_Loss, color=RED, ls='--', lw=2, label=f'STOP ${row.Stop_Loss}')
-        ax1.fill_between(prices.index, row.Stop_Loss, row.Buy_Trigger, color=RED, alpha=0.12)
+        # Growth Estimates
+        ax.text(0.5, 3.8, "Growth Track", fontsize=18, color=RED, fontweight='bold')
+        ax.text(0.5, 3.3, f"• RS Rating: {row.RS_Rating}", color=TEXT_COLOR, fontsize=12)
+        ax.text(0.5, 2.9, f"• RVOL Score: {row.RVOL}x", color=TEXT_COLOR, fontsize=12)
         
-        ax1.set_title(f"${ticker} | GLOBAL EQUITY BRIEFING", fontsize=20, fontweight='bold', color='white', pad=25)
-        ax1.grid(color='#2c2e33', alpha=0.5)
-        ax1.legend(facecolor=BG_COLOR, edgecolor='white')
-
-        # PANEL 2: Grouped Financial Bars (Exact Revenue vs Net Income)
-        if len(years) > 0:
-            ax2.set_facecolor(BG_COLOR)
-            x = np.arange(len(years))
-            ax2.bar(x - 0.2, rev, 0.4, label='Revenue ($B)', color=CYAN, alpha=0.9)
-            ax2.bar(x + 0.2, net, 0.4, label='Net Income ($B)', color=GREEN, alpha=0.9)
-            
-            ax2.set_xticks(x)
-            ax2.set_xticklabels(years, fontweight='bold', color='#cccccc')
-            ax2.set_title("ANNUAL PERFORMANCE TREND", fontsize=13, color='#888888', pad=15)
-            ax2.legend(loc='upper left', frameon=False)
-            ax2.spines['top'].set_visible(False)
-            ax2.spines['right'].set_visible(False)
-        else:
-            ax2.text(0.5, 0.5, "Financial History Not Found", ha='center', color='gray')
-
-        plt.tight_layout(pad=4.0)
+        # Price Tag Element
+        tag_poly = Polygon([[7.0, 5.2], [9.8, 5.2], [9.8, 1.2], [7.0, 1.2], [6.4, 3.2]], color=ORANGE)
+        ax.add_patch(tag_poly)
+        ax.add_patch(Circle((6.9, 3.2), 0.08, color=BG_COLOR))
+        ax.text(8.4, 4.6, "Price", color=BG_COLOR, ha='center', fontweight='bold', fontsize=12)
+        ax.text(8.4, 3.8, f"${row.Price}", color=BG_COLOR, ha='center', fontsize=32, fontweight='black')
         
-        # Save to memory
+        target = info.get('targetMeanPrice', 0)
+        upside = ((target/row.Price)-1)*100 if target else 0
+        ax.text(8.4, 3.0, f"{upside:.1f}% OFF", color=BG_COLOR, ha='center', fontweight='bold', 
+                bbox=dict(facecolor='white', edgecolor='none', boxstyle='round,pad=0.3'))
+        ax.text(8.4, 1.8, f"Consensus: ${target}", color=BG_COLOR, ha='center', fontsize=10, fontweight='bold')
+
+        draw_fair_value_bar(ax, 3.8, 2.0, upside)
+
         buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=140, bbox_inches='tight', facecolor=BG_COLOR)
-        buf.seek(0)
-        plt.close()
-
-        # Build Message
-        caption = (
-            f"🚀 **APEX BREAKOUT: ${ticker}**\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"{thesis}\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 **MOMENTUM:** RS {row.RS_Rating} | RVOL {row.RVOL}x | ADR {row['ADR%']}%"
-        )
-        
-        url = f"https://api.telegram.org/bot{os.environ.get('TELEGRAM_BOT_TOKEN')}/sendPhoto"
-        requests.post(url, files={'photo': buf}, data={'chat_id': os.environ.get('TELEGRAM_CHAT_ID'), 'caption': caption, 'parse_mode': 'Markdown'})
-    
+        plt.savefig(buf, format='png', dpi=150, facecolor=BG_COLOR)
+        buf.seek(0); plt.close()
+        return buf, upside
     except Exception as e:
-        print(f"❌ Visual Render Error for {ticker}: {e}")
+        print(f"❌ Render Error {ticker}: {e}"); return None, 0
 
-# --- 4. ENGINE EXECUTION ---
+# --- 2. THE SCANNER ENGINE ---
 def run_scanner():
-    print(f"🚀 Initializing Exact-Spec Scan...")
-    gc = get_gspread_client()
+    print(f"🚀 Starting Full Apex Scan...")
+    
+    # Auth
+    creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
+    gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
     sh = gc.open("Stock Scanner")
     
-    # Get Tickers (S&P 500)
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    req = Request('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', headers=headers)
+    # Get Tickers
+    req = Request('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', headers={'User-Agent': 'Mozilla/5.0'})
     with urlopen(req) as resp:
         tickers = pd.read_html(io.BytesIO(resp.read()))[0]['Symbol'].tolist()
     
-    # Data Download
-    data = yf.download(tickers + ["SPY"], period="1y", group_by='ticker', progress=False)
+    data = yf.download(tickers + ["SPY"], period="5y", group_by='ticker', progress=False)
     spy_close = data['SPY']['Close']
     
     results = []
@@ -156,46 +125,61 @@ def run_scanner():
         try:
             t = t.replace('.', '-')
             df = data[t].dropna()
-            if len(df) < 150: continue
+            if len(df) < 252: continue
             
+            # Math
             curr_p = df['Close'].iloc[-1]
-            # Filters: Strong Trend + Liquid
-            sma50, sma200 = df['Close'].rolling(50).mean().iloc[-1], df['Close'].rolling(200).mean().iloc[-1]
-            if not (curr_p > sma50 > sma200): continue
+            perf_5y = ((curr_p / df['Close'].iloc[0]) - 1) * 100
+            ytd_start = df['Close'].loc[df.index >= f"{datetime.now().year}-01-01"].iloc[0]
+            perf_ytd = ((curr_p / ytd_start) - 1) * 100
             
             rs_line = df['Close'] / spy_close
             rs_rating = round(((rs_line.iloc[-1] / rs_line.rolling(150).mean().iloc[-1]) - 1) * 100, 2)
             rvol = round(df['Volume'].iloc[-1] / df['Volume'].rolling(20).mean().iloc[-1], 2)
             
-            if rs_rating > 5 and rvol > 1.1:
-                atr = (df['High'] - df['Low']).rolling(20).mean().iloc[-1]
+            # Core Filter
+            if rs_rating > 5 and rvol > 1.0:
                 results.append({
                     'Stock': t, 'Price': round(curr_p, 2), 'RS_Rating': rs_rating, 
-                    'RVOL': rvol, 'ADR%': round((atr/curr_p)*100, 2),
-                    'Buy_Trigger': round(df['High'].tail(5).max() * 1.002, 2),
-                    'Stop_Loss': round(curr_p * 0.94, 2), # Fixed 6% stop
-                    'Score': rs_rating + (rvol * 10)
+                    'RVOL': rvol, '5Y_Perf': perf_5y, 'YTD_Perf': perf_ytd,
+                    'Score': rs_rating + (rvol * 5)
                 })
         except: continue
 
-    df_res = pd.DataFrame(results).sort_values('Score', ascending=False).head(25)
-    
-    theses = []
-    for i, (idx, row) in enumerate(df_res.head(5).iterrows()):
-        print(f"📊 Rendering Infographic for {row.Stock}...")
-        thesis = get_equity_briefing_data(row.Stock, row)
-        theses.append(thesis)
-        if i < 3:
-            # Trigger Telegram Alert with exact layout
-            send_telegram_alert(row.Stock, row, yf.download(row.Stock, period='1y', progress=False), thesis)
-    
-    while len(theses) < len(df_res): theses.append("")
-    df_res['Infographic_Data'] = theses
+    df_all = pd.DataFrame(results).sort_values('Score', ascending=False)
+    df_top = df_all.head(10).copy()
 
-    # Push to Google Sheets
-    sh.worksheet("Core Screener").clear()
-    sh.worksheet("Core Screener").update([df_res.columns.tolist()] + df_res.astype(str).values.tolist())
-    print("🏁 Exact-Spec Scan Complete. Check Telegram.")
+    # Process Top Picks & Send Telegram
+    final_briefs = []
+    for i, (idx, row) in enumerate(df_top.iterrows()):
+        print(f"📦 Deep Data for {row.Stock}...")
+        t_obj = yf.Ticker(row.Stock)
+        info, fin = t_obj.info, t_obj.financials.T
+        
+        img, upside = create_infographic(row.Stock, row, info, fin)
+        final_briefs.append(f"{upside:.1f}% Upside")
+        
+        if img and i < 5: # Send top 5 to Telegram
+            requests.post(f"https://api.telegram.org/bot{os.environ.get('TELEGRAM_BOT_TOKEN')}/sendPhoto", 
+                          files={'photo': img}, 
+                          data={'chat_id': os.environ.get('TELEGRAM_CHAT_ID'), 'caption': f"🎯 **APEX PICK: ${row.Stock}**", 'parse_mode': 'Markdown'})
+    
+    df_top['Analysis'] = final_briefs
+
+    # --- 3. GOOGLE SHEETS UPDATES ---
+    try:
+        # Update Main List
+        core_sheet = sh.worksheet("Core Screener")
+        core_sheet.clear()
+        core_sheet.update([df_all.columns.tolist()] + df_all.head(100).astype(str).values.tolist())
+        
+        # Update Summary List
+        sum_sheet = sh.worksheet("Summary")
+        sum_sheet.clear()
+        sum_sheet.update([df_top.columns.tolist()] + df_top.astype(str).values.tolist())
+        print("✅ Sheets Updated.")
+    except Exception as e:
+        print(f"⚠️ Sheets Error: {e}")
 
 if __name__ == "__main__":
     run_scanner()
