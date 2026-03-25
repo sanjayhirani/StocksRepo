@@ -4,7 +4,7 @@ import numpy as np
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import matplotlib.pyplot as plt
-from matplotlib.patches import Wedge, Rectangle, Polygon, Circle, FancyBboxPatch
+from matplotlib.patches import Wedge, Rectangle, Polygon, Circle
 import io, requests, os, json
 from datetime import datetime
 from urllib.request import Request, urlopen
@@ -15,13 +15,13 @@ BG_WHITE = '#ffffff'; TEAL = '#42cbf5'; ORANGE_TAG = '#ffbf7f'
 GRAY_BG = '#e0e0e0'; BLACK = '#000000'; RED = '#ff4b4b'; GREEN = '#009933'
 
 def safe_float(val, default=0.0):
+    if val is None or (isinstance(val, float) and (np.isnan(val) or np.isinf(val))):
+        return default
     try:
-        res = float(val)
-        return default if np.isnan(res) or np.isinf(res) else res
+        return float(val)
     except: return default
 
 def draw_ring(ax, x, y, pct, label, color, size=0.24):
-    """Heavy-weight donuts for high-res Telegram visibility"""
     pct_val = max(min(safe_float(pct), 150), 0)
     ax.add_patch(Wedge((x, y), size, 0, 360, width=size*0.35, color=GRAY_BG, zorder=2))
     ax.add_patch(Wedge((x, y), size, 90, 90-(min(pct_val, 100)*3.6), width=size*0.35, color=color, zorder=3))
@@ -47,22 +47,41 @@ def create_master_infographic(ticker, row, info, fin, cf):
         ax.text(9.6, 12.7, f"{row['5Y_Perf']:.0f}% 5Y", ha='right', fontsize=28, fontweight='bold', color=GREEN if row['5Y_Perf'] > 0 else RED)
         ax.text(9.6, 12.2, f"{row['YTD_Perf']:.0f}% YTD", ha='right', fontsize=28, fontweight='bold', color=GREEN if row['YTD_Perf'] > 0 else RED)
 
-        # --- 1. FINANCIAL BARS ---
+        # --- 1. BAR GRAPH (FIXED CALENDAR ANCHOR) ---
         ax.text(5.0, 11.6, "● Revenue  ● Net Income  ● FCF", fontsize=18, color='#666666', ha='center', fontweight='bold')
         try:
-            r_idx = [i for i in fin.index if 'Revenue' in i][0]
-            n_idx = [i for i in fin.index if 'Net Income' in i][0]
-            f_idx = [i for i in cf.index if 'Free Cash Flow' in i][0]
-            dp = pd.DataFrame({'R': fin.loc[r_idx], 'N': fin.loc[n_idx], 'F': cf.loc[f_idx]}).fillna(0).head(8)[::-1]
-            if not dp.empty:
-                x_pts = np.linspace(1.2, 8.8, len(dp))
-                norm = dp['R'].max() if dp['R'].max() > 0 else 1.0
-                for i, (idx, v) in enumerate(dp.iterrows()):
-                    ax.add_patch(Rectangle((x_pts[i]-0.28, 8.8), 0.2, (v['R']/norm)*2.3, color=BLACK))
-                    ax.add_patch(Rectangle((x_pts[i]-0.05, 8.8), 0.2, (v['N']/norm)*2.3, color=TEAL))
-                    ax.add_patch(Rectangle((x_pts[i]+0.18, 8.8), 0.2, (v['F']/norm)*2.3, color=RED))
-                    ax.text(x_pts[i], 8.4, str(idx.year), ha='center', fontsize=16, color='#333333', fontweight='bold')
-        except: pass
+            # We define the specific years we want to see (integrity anchor)
+            current_year = datetime.now().year
+            target_years = [current_year - i for i in range(1, 6)][::-1] # e.g., 2021, 2022, 2023, 2024, 2025
+            
+            # Map data to specific years, filling missing with 0 to keep the X-axis stable
+            r_map = {idx.year: val for idx, val in fin.loc['Total Revenue'].items()}
+            n_map = {idx.year: val for idx, val in fin.loc['Net Income'].items()}
+            f_map = {idx.year: val for idx, val in cf.loc['Free Cash Flow'].items()}
+            
+            plot_data = []
+            for yr in target_years:
+                plot_data.append({
+                    'Year': yr,
+                    'R': r_map.get(yr, 0),
+                    'N': n_map.get(yr, 0),
+                    'F': f_map.get(yr, 0)
+                })
+            
+            dp = pd.DataFrame(plot_data)
+            x_pts = np.linspace(1.2, 8.8, len(target_years))
+            norm = dp['R'].replace(0, np.nan).max() # Norm against highest revenue in the window
+            if pd.isna(norm): norm = 1.0
+
+            for i, row_data in dp.iterrows():
+                # Only draw if Revenue exists to avoid empty floating bars
+                if row_data['R'] > 0:
+                    ax.add_patch(Rectangle((x_pts[i]-0.28, 8.8), 0.2, (row_data['R']/norm)*2.3, color=BLACK))
+                    ax.add_patch(Rectangle((x_pts[i]-0.05, 8.8), 0.2, (row_data['N']/norm)*2.3, color=TEAL))
+                    ax.add_patch(Rectangle((x_pts[i]+0.18, 8.8), 0.2, (row_data['F']/norm)*2.3, color=RED))
+                ax.text(x_pts[i], 8.4, str(int(row_data['Year'])), ha='center', fontsize=16, color='#333333', fontweight='bold')
+        except Exception as e:
+            print(f"Calendar Mapping Error: {e}")
 
         # --- 2. MARGINS ---
         draw_ring(ax, 8.2, 10.3, safe_float(info.get('grossMargins'))*100, "Gross", TEAL)
@@ -70,16 +89,16 @@ def create_master_infographic(ticker, row, info, fin, cf):
         draw_ring(ax, 8.2, 8.5, safe_float(info.get('profitMargins'))*100, "Net", TEAL)
         draw_ring(ax, 8.2, 7.6, 22, "FCF", RED)
 
-        # --- 3. KEY RATIOS (ALL DONUTS) ---
+        # --- 3. KEY RATIOS (DONUTS) ---
         ax.text(0.5, 7.8, "Key ratios", fontsize=34, fontweight='black')
         draw_ring(ax, 0.8, 6.9, safe_float(info.get('payoutRatio'))*100, "BuyBack", TEAL)
         draw_ring(ax, 0.8, 6.0, 107, "Net Retention", RED)
         draw_ring(ax, 0.8, 5.1, safe_float(info.get('returnOnAssets'))*100, "ROIC", TEAL)
-        draw_ring(ax, 0.8, 4.2, 100, f"${safe_float(info.get('totalRevenue'))/1e9:.1f}B Revenue", TEAL)
+        draw_ring(ax, 0.8, 4.2, 100, f"${safe_float(info.get('totalRevenue'))/1e9:.1f}B Rev", TEAL)
         draw_ring(ax, 0.8, 3.3, 100, f"${safe_float(info.get('totalCash'))/1e9:.1f}B Cash", TEAL)
         draw_ring(ax, 0.8, 2.4, safe_float(info.get('forwardPE')), f"P/E {safe_float(info.get('forwardPE'),0):.0f}", RED)
 
-        # --- 4. 2028 GROWTH & GROWTH SINCE 2022 ---
+        # --- 4. GROWTH ---
         ax.text(4.2, 7.8, "2028 Growth Estimates", fontsize=30, fontweight='black')
         draw_ring(ax, 4.5, 6.9, safe_float(info.get('revenueGrowth'))*100, "Rev CAGR", TEAL)
         draw_ring(ax, 4.5, 6.0, safe_float(info.get('earningsGrowth'))*100, "EPS CAGR", TEAL)
@@ -104,38 +123,48 @@ def create_master_infographic(ticker, row, info, fin, cf):
 
         buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=300); buf.seek(0); plt.close()
         return buf
-    except Exception as e: return None
+    except Exception: return None
 
 def run_scanner():
-    # --- 1. GOOGLE SHEETS UPDATE (FIRST PRIORITY) ---
     creds = json.loads(os.environ.get("GOOGLE_CREDS"))
     gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
     sh = gc.open("Stock Scanner")
     
     wiki = pd.read_html(urlopen(Request('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', headers={'User-Agent': 'v'})))[0]
     tkrs = [str(t).strip().replace('.', '-') for t in wiki['Symbol'].tolist()]
-    data = yf.download(tkrs + ["SPY"], period="5y", group_by='ticker', progress=False)
+    data = yf.download(tkrs + ["SPY"], period="6y", group_by='ticker', progress=False)
     
     res = []
+    ytd_start = '2026-01-01'
     for t in tkrs:
         try:
             df = data[t].dropna()
-            if len(df) < 252: continue
+            if len(df) < 1260: continue
+            
             curr = df['Close'].iloc[-1]
-            rel = df['Close'] / data['SPY']['Close']
+            five_y_price = df['Close'].iloc[-1260]
+            ytd_df = df.loc[df.index >= ytd_start]
+            ytd_price = ytd_df['Close'].iloc[0] if not ytd_df.empty else curr
+
+            rel = df['Close'] / data['SPY']['Close'].reindex(df.index)
             rs = ((rel.iloc[-1] / rel.rolling(150).mean().iloc[-1]) - 1) * 100
-            res.append({'Stock': t, 'Price': round(curr, 2), 'RS_Rating': round(rs, 2), 'Score': round(rs, 2), '5Y_Perf': round(((curr/df['Close'].iloc[0])-1)*100, 2), 'YTD_Perf': round(((curr/df['Close'].loc[df.index >= '2026-01-01'].iloc[0])-1)*100, 2)})
+            
+            res.append({
+                'Stock': t, 'Price': round(curr, 2), 'RS_Rating': round(rs, 2), 
+                'Score': round(rs, 2), '5Y_Perf': round(((curr/five_y_price)-1)*100, 2), 
+                'YTD_Perf': round(((curr/ytd_price)-1)*100, 2)
+            })
         except: continue
 
     df_full = pd.DataFrame(res).sort_values('Score', ascending=False)
     
-    # UPDATE SHEETS
+    # Update Google Sheets
     for sn in ["Core Screener", "Summary"]:
         ws = sh.worksheet(sn)
         out = df_full if sn == "Core Screener" else df_full.head(10)
         ws.clear(); ws.update([out.columns.tolist()] + out.astype(str).values.tolist())
 
-    # --- 2. TELEGRAM RENDERING ---
+    # Telegram Rendering
     for i, (idx, r) in enumerate(df_full.head(5).iterrows()):
         to = yf.Ticker(r.Stock)
         img = create_master_infographic(r.Stock, r, to.info, to.financials, to.cashflow)
