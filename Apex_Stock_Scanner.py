@@ -5,14 +5,11 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import matplotlib.pyplot as plt
 from matplotlib.patches import Wedge, Rectangle, Polygon, Circle
-import io
-import requests
-import os
-import json
+import io, requests, os, json
 from datetime import datetime
 from urllib.request import Request, urlopen
 
-# --- COLORS ---
+# --- CONSTANTS & STYLING ---
 BG_WHITE = '#ffffff'; TEAL = '#00bfbf'; ORANGE_TAG = '#ffbf7f'
 GRAY_BG = '#e0e0e0'; BLACK = '#000000'; RED = '#ff4444'; GREEN = '#009933'
 
@@ -41,50 +38,48 @@ def create_exact_infographic(ticker, row, info, fin):
         ax.text(9.5, 12.7, f"{row['5Y_Perf']:.0f}% 5Y", ha='right', fontsize=18, color=GREEN if row['5Y_Perf']>0 else RED)
         ax.text(9.5, 12.2, f"{row['YTD_Perf']:.0f}% YTD", ha='right', fontsize=18, color=GREEN if row['YTD_Perf']>0 else RED)
 
-        # --- FINANCIAL BARS (NON-BLOCKING) ---
+        # --- FINANCIAL BARS (FIXED KEY ACCESS) ---
         ax.text(0.8, 11.2, "● Revenue  ● Net Income  ● FCF", fontsize=10, color='#666666')
         try:
             if fin is not None and not fin.empty:
                 df = fin.T if fin.shape[0] < fin.shape[1] else fin
-                r = df.get('Total Revenue', pd.Series(0, index=df.index))
-                n = df.get('Net Income', df.get('Net Income Common Stockholders', pd.Series(0, index=df.index)))
-                f = df.get('Free Cash Flow', df.get('Operating Cash Flow', pd.Series(0, index=df.index)))
+                dp = pd.DataFrame({
+                    'R': df.get('Total Revenue', pd.Series(0, index=df.index)),
+                    'N': df.get('Net Income', df.get('Net Income Common Stockholders', pd.Series(0, index=df.index))),
+                    'F': df.get('Free Cash Flow', df.get('Operating Cash Flow', pd.Series(0, index=df.index)))
+                }).replace([np.inf, -np.inf], 0).fillna(0).head(7)[::-1]
                 
-                df_plot = pd.DataFrame({'R': r, 'N': n, 'F': f}).replace([np.inf, -np.inf], 0).fillna(0).head(7)[::-1]
-                if not df_plot.empty:
-                    x_pts = np.linspace(0.8, 6.2, len(df_plot))
-                    w, norm = 0.14, (df_plot['R'].max() if df_plot['R'].max() > 0 else 1)
-                    for i, (idx, v) in enumerate(df_plot.iterrows()):
-                        ax.add_patch(Rectangle((x_pts[i]-w*1.5, 8.5), w, (safe_float(v['R'])/norm)*2.5, color=BLACK))
-                        ax.add_patch(Rectangle((x_pts[i]-w*0.5, 8.5), w, (safe_float(v['N'])/norm)*2.5, color=TEAL))
-                        ax.add_patch(Rectangle((x_pts[i]+w*0.5, 8.5), w, (safe_float(v['F'])/norm)*2.5, color=RED))
+                if not dp.empty:
+                    x_pts = np.linspace(0.8, 6.5, len(dp))
+                    norm = dp['R'].max() if dp['R'].max() > 0 else 1
+                    for i, (idx, v) in enumerate(dp.iterrows()):
+                        ax.add_patch(Rectangle((x_pts[i]-0.21, 8.5), 0.14, (v['R']/norm)*2.5, color=BLACK))
+                        ax.add_patch(Rectangle((x_pts[i]-0.07, 8.5), 0.14, (v['N']/norm)*2.5, color=TEAL))
+                        ax.add_patch(Rectangle((x_pts[i]+0.07, 8.5), 0.14, (v['F']/norm)*2.5, color=RED))
                         ax.text(x_pts[i], 8.2, str(idx)[:4], ha='center', fontsize=9, color='#666666')
-        except: pass # Move on if bars fail to avoid "Render fail"
+        except: pass
 
         # --- MARGINS ---
         ax.text(7.5, 11.2, "Margins", fontsize=22, fontweight='bold', color=TEAL)
         draw_ring(ax, 7.5, 10.4, safe_float(info.get('grossMargins', 0))*100, "Gross", TEAL)
         draw_ring(ax, 7.5, 9.5, safe_float(info.get('ebitdaMargins', 0))*100, "EBIT", RED)
         draw_ring(ax, 7.5, 8.6, safe_float(info.get('profitMargins', 0))*100, "Net", TEAL)
-        rev = safe_float(info.get('totalRevenue', 1))
-        fcf_m = (safe_float(info.get('freeCashflow', 0))/rev)*100 if rev != 0 else 0
-        draw_ring(ax, 7.5, 7.7, fcf_m, "FCF", RED)
+        draw_ring(ax, 7.5, 7.7, (safe_float(info.get('freeCashflow', 0))/safe_float(info.get('totalRevenue', 1)))*100, "FCF", RED)
 
-        # --- BULL CASE & FAIR VALUE ---
-        ax.text(3.8, 3.5, "Bull Case", fontsize=18, fontweight='bold', color=BLACK)
-        ax.text(3.8, 2.3, "• AI Inflection\n• Momentum Lead\n• Sector Strength", fontsize=12)
-        ax.add_patch(Rectangle((3.8, 3.8), 2.0, 0.3, color=TEAL, alpha=0.9))
-        ax.add_patch(Rectangle((5.8, 3.8), 1.0, 0.3, color=RED, alpha=0.9))
-        ax.text(4.8, 4.2, "Fair Value Bar", fontweight='bold', ha='center', fontsize=10)
+        # --- BULL CASE & FAIR VALUE BAR ---
+        ax.text(4.8, 4.4, "Fair Value Bar", fontweight='bold', ha='center', fontsize=10)
+        ax.add_patch(Rectangle((3.8, 4.0), 2.0, 0.3, color=TEAL))
+        ax.add_patch(Rectangle((5.8, 4.0), 1.0, 0.3, color=RED))
+        ax.text(3.8, 3.6, "Bull Case", fontsize=18, fontweight='bold', color=BLACK)
+        ax.text(3.8, 2.3, "• AI Inflection\n• Momentum Lead\n• Sector Strength", fontsize=11)
 
         # --- PRICE TAG ---
-        tag = Polygon([[7.0, 5.8], [9.8, 5.8], [9.8, 0.5], [7.8, 0.5], [7.0, 3.2]], color=ORANGE_TAG)
-        ax.add_patch(tag); ax.add_patch(Circle((7.4, 3.2), 0.1, color=BG_WHITE))
-        ax.text(8.4, 4.0, f"${row.Price}", ha='center', fontweight='black', fontsize=45)
+        tag = Polygon([[7.0, 6.0], [9.8, 6.0], [9.8, 0.5], [7.8, 0.5], [7.0, 3.2]], color=ORANGE_TAG)
+        ax.add_patch(tag); ax.add_patch(Circle((7.4, 3.2), 0.15, color=BG_WHITE))
+        ax.text(8.4, 4.2, f"${row.Price}", ha='center', fontweight='black', fontsize=50)
         t_mean = safe_float(info.get('targetMeanPrice', row.Price))
-        off_pct = ((t_mean/row.Price)-1)*100 if row.Price != 0 else 0
-        ax.text(8.4, 3.1, f"{off_pct:.0f}% OFF", ha='center', fontweight='bold', bbox=dict(facecolor='white', edgecolor='none'))
-        ax.text(8.4, 1.1, f"${t_mean:.1f} Consensus", ha='center', fontsize=10, fontweight='bold')
+        ax.text(8.4, 3.2, f"{((t_mean/row.Price)-1)*100:.0f}% OFF", ha='center', fontweight='bold', bbox=dict(facecolor='white', edgecolor='none'))
+        ax.text(8.4, 0.8, f"${t_mean:.1f} Consensus", ha='center', fontsize=10, fontweight='bold')
 
         # --- TIMESTAMP ---
         ax.text(0.5, 0.5, f"Data as of: {datetime.now().strftime('%Y-%m-%d %H:%M')}", fontsize=8, color='#999999')
@@ -92,13 +87,15 @@ def create_exact_infographic(ticker, row, info, fin):
         buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=300, bbox_inches='tight'); buf.seek(0); plt.close()
         return buf
     except Exception as e:
-        print(f"❌ Critical Render Fail {ticker}: {e}"); return None
+        print(f"❌ Render error {ticker}: {e}"); return None
 
 def run_scanner():
+    # 1. AUTH & SETUP
     creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
     gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
     sh = gc.open("Stock Scanner")
     
+    # 2. CORE SCANNER DATA
     wiki_table = pd.read_html(urlopen(Request('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', headers={'User-Agent': 'Mozilla/5.0'})))[0]
     tickers = [str(t).strip().replace('.', '-') for t in wiki_table['Symbol'].tolist()]
     data = yf.download(tickers + ["SPY"], period="5y", group_by='ticker', progress=False)
@@ -119,9 +116,10 @@ def run_scanner():
             })
         except: continue
 
-    df_full = pd.DataFrame(results).sort_values('Score', ascending=False).replace([np.inf, -np.inf], 0).fillna(0)
+    df_full = pd.DataFrame(results).sort_values('Score', ascending=False)
     df_top = df_full.head(10).copy()
 
+    # 3. TELEGRAM ALERTS
     for i, (idx, row) in enumerate(df_top.iterrows()):
         t_obj = yf.Ticker(row.Stock)
         img = create_exact_infographic(row.Stock, row, t_obj.info, t_obj.financials)
@@ -130,6 +128,7 @@ def run_scanner():
                           files={'photo': ('img.png', img, 'image/png')}, 
                           data={'chat_id': os.environ.get('TELEGRAM_CHAT_ID'), 'caption': f"🎯 **APEX PICK: ${row.Stock}**", 'parse_mode': 'Markdown'})
 
+    # 4. FULL SHEETS UPDATE (Summary & Core Screener)
     for s_name in ["Core Screener", "Summary"]:
         ws = sh.worksheet(s_name)
         df = df_full if s_name == "Core Screener" else df_top
