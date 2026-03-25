@@ -35,7 +35,7 @@ def create_master_infographic(ticker, row, info, fin, cf):
         # --- HEADER (Margin 0.6) ---
         try:
             domain = info.get('website', '').replace('https://', '').split('/')[0]
-            logo_img = Image.open(requests.get(f"https://logo.clearbit.com/{domain}?size=400", stream=True).raw)
+            logo_img = Image.open(requests.get(f"https://logo.clearbit.com/{domain}?size=400", stream=True, timeout=5).raw)
             ax.imshow(logo_img, extent=[0.6, 1.8, 12.3, 13.5], zorder=5, aspect='equal')
             ax.text(2.1, 12.8, ticker, fontsize=95, fontweight='black', color=BLACK)
         except:
@@ -53,14 +53,15 @@ def create_master_infographic(ticker, row, info, fin, cf):
         for i in range(0, 6):
             y_pos = chart_bottom + (i/5 * chart_height)
             ax.plot([0.9, 7.8], [y_pos, y_pos], color='#eeeeee', lw=1, zorder=0)
-            ax.text(0.85, y_pos, f"${i*500}M", ha='right', fontsize(9), color='#999999', fontweight='bold')
+            # FIXED SYNTAX ERROR HERE
+            ax.text(0.85, y_pos, f"${i*500}M", ha='right', fontsize=9, color='#999999', fontweight='bold')
 
         for i, yr in enumerate(target_years):
-            lbl = f"{yr}*" if yr >= 2027 else str(yr)
+            lbl = f"{yr}*" if yr >= 2027 else str(yr) # asterisks as per saved info
             ax.text(x_pts[i], chart_bottom - 0.25, lbl, ha='center', fontsize=10, fontweight='bold')
-            ax.add_patch(Rectangle((x_pts[i]-0.1, chart_bottom), 0.08, 1.2, color=BLACK)) # Rev
-            ax.add_patch(Rectangle((x_pts[i], chart_bottom), 0.08, 0.4, color=TEAL)) # NI
-            ax.add_patch(Rectangle((x_pts[i]+0.1, chart_bottom), 0.08, 0.3, color=RED)) # FCF
+            ax.add_patch(Rectangle((x_pts[i]-0.1, chart_bottom), 0.08, 1.2, color=BLACK)) 
+            ax.add_patch(Rectangle((x_pts[i], chart_bottom), 0.08, 0.4, color=TEAL)) 
+            ax.add_patch(Rectangle((x_pts[i]+0.1, chart_bottom), 0.08, 0.3, color=RED)) 
 
         # --- MARGINS (Top Right) ---
         ax.text(8.3, 11.2, "Margins", fontsize=22, fontweight='black', color=TEAL)
@@ -69,8 +70,8 @@ def create_master_infographic(ticker, row, info, fin, cf):
         draw_ring(ax, 8.2, 9.0, safe_float(info.get('profitMargins'))*100, f"{int(safe_float(info.get('profitMargins'))*100)}% Net", TEAL)
         draw_ring(ax, 8.2, 8.3, 22, "22% FCF", RED)
 
-        # --- KEY RATIOS (Left Column) ---
-        ax.text(0.6, 8.1, "O Key ratios", fontsize=28, fontweight='black') 
+        # --- KEY RATIOS (Left Column - ALL RINGS) ---
+        ax.text(0.6, 8.1, "Key ratios", fontsize=28, fontweight='black') 
         draw_ring(ax, 0.8, 7.4, 6, "6% BuyBack", TEAL)
         draw_ring(ax, 0.8, 6.7, 107, "107% Net Retention", RED)
         draw_ring(ax, 0.8, 6.0, 11, "11% ROIC", TEAL)
@@ -97,7 +98,8 @@ def create_master_infographic(ticker, row, info, fin, cf):
 
         # --- BULL CASE (Center Bottom) ---
         ax.text(4.2, 1.2, "Bull Case", fontsize=24, fontweight='black')
-        ax.text(4.2, 0.7, "• AI  • Agentic AI  • The Platform", fontsize(15), fontweight='bold')
+        # FIXED SYNTAX ERROR HERE
+        ax.text(4.2, 0.7, "• AI  • Agentic AI  • The Platform", fontsize=15, fontweight='bold')
 
         # --- PRICE TAG (Right) ---
         tag_pts = [[7.5, 7.5], [9.6, 7.5], [9.6, 0.4], [7.8, 0.4], [7.5, 4.0]]
@@ -113,30 +115,36 @@ def create_master_infographic(ticker, row, info, fin, cf):
     except Exception: return None
 
 def run_scanner():
-    creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
-    gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
-    sh = gc.open("Stock Scanner")
-    wiki = pd.read_html(urlopen(Request('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', headers={'User-Agent': 'v'})))[0]
-    tkrs = [str(t).strip().replace('.', '-') for t in wiki['Symbol'].tolist()]
-    data = yf.download(tkrs + ["SPY"], period="6y", group_by='ticker', progress=False)
-    res = []
-    for t in tkrs:
-        try:
-            df = data[t].dropna()
-            if len(df) < 1260: continue
-            curr = df['Close'].iloc[-1]
-            rel = df['Close'] / data['SPY']['Close'].reindex(df.index)
-            rs = ((rel.iloc[-1] / rel.rolling(150).mean().iloc[-1]) - 1) * 100
-            res.append({'Stock': t, 'Price': round(curr, 2), 'RS_Rating': round(rs, 2), 'Score': round(rs, 2), '5Y_Perf': round(((curr/df['Close'].iloc[-1260])-1)*100, 2), 'YTD_Perf': round(((curr/df['Close'].loc[df.index >= '2026-01-01'].iloc[0])-1)*100, 2)})
-        except: continue
-    df_full = pd.DataFrame(res).sort_values('Score', ascending=False)
-    for sn in ["Core Screener", "Summary"]:
-        ws = sh.worksheet(sn); out = df_full if sn == "Core Screener" else df_full.head(10)
-        ws.clear(); ws.update([out.columns.tolist()] + out.astype(str).values.tolist())
-    for i, (idx, r) in enumerate(df_full.head(5).iterrows()):
-        to = yf.Ticker(r.Stock)
-        img = create_master_infographic(r.Stock, r, to.info, to.financials, to.cashflow)
-        if img: requests.post(f"https://api.telegram.org/bot{os.environ.get('TELEGRAM_BOT_TOKEN')}/sendPhoto", files={'photo': ('i.png', img)}, data={'chat_id': os.environ.get('TELEGRAM_CHAT_ID')})
+    try:
+        creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
+        gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
+        sh = gc.open("Stock Scanner")
+        
+        wiki = pd.read_html(urlopen(Request('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', headers={'User-Agent': 'v'})))[0]
+        tkrs = [str(t).strip().replace('.', '-') for t in wiki['Symbol'].tolist()]
+        data = yf.download(tkrs + ["SPY"], period="6y", group_by='ticker', progress=False)
+        
+        res = []
+        for t in tkrs:
+            try:
+                df = data[t].dropna()
+                if len(df) < 1260: continue
+                curr = df['Close'].iloc[-1]
+                rel = df['Close'] / data['SPY']['Close'].reindex(df.index)
+                rs = ((rel.iloc[-1] / rel.rolling(150).mean().iloc[-1]) - 1) * 100
+                res.append({'Stock': t, 'Price': round(curr, 2), 'RS_Rating': round(rs, 2), 'Score': round(rs, 2), '5Y_Perf': round(((curr/df['Close'].iloc[-1260])-1)*100, 2), 'YTD_Perf': round(((curr/df['Close'].loc[df.index >= '2026-01-01'].iloc[0])-1)*100, 2)})
+            except: continue
 
-if __name__ == "__main__":
-    run_scanner()
+        df_full = pd.DataFrame(res).sort_values('Score', ascending=False)
+        for sn in ["Core Screener", "Summary"]:
+            ws = sh.worksheet(sn); out = df_full if sn == "Core Screener" else df_full.head(10)
+            ws.clear(); ws.update([out.columns.tolist()] + out.astype(str).values.tolist())
+
+        for i, (idx, r) in enumerate(df_full.head(5).iterrows()):
+            to = yf.Ticker(r.Stock)
+            img = create_master_infographic(r.Stock, r, to.info, to.financials, to.cashflow)
+            if img: requests.post(f"https://api.telegram.org/bot{os.environ.get('TELEGRAM_BOT_TOKEN')}/sendPhoto", files={'photo': ('i.png', img)}, data={'chat_id': os.environ.get('TELEGRAM_CHAT_ID')})
+    except Exception as e:
+        print(f"Error in scanner: {e}")
+
+if __
