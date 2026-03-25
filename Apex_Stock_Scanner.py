@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import google.generativeai as genai  # Switched to the stable library
+import google.generativeai as genai 
 import matplotlib.pyplot as plt
 import io
 import requests
@@ -14,8 +14,10 @@ from urllib.request import Request, urlopen
 
 # --- 1. AUTHENTICATION ---
 def setup_ai():
+    # Explicitly configure the API Key
     genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-    return genai.GenerativeModel('gemini-1.5-flash')
+    # FIX: Use 'gemini-1.5-flash-latest' to bypass version-specific 404s
+    return genai.GenerativeModel('gemini-1.5-flash-latest')
 
 def get_gspread_client():
     creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
@@ -52,6 +54,7 @@ def get_bespoke_summary(ticker, row):
             "- Verdict: [1-sentence trading conviction]"
         )
         
+        # Calling the generation
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
@@ -157,7 +160,6 @@ def run_scanner():
             thesis = get_bespoke_summary(row.Stock, row)
             theses.append(thesis)
             if i < 3:
-                # Top 3 alerts
                 send_telegram_alert(row.Stock, row, yf.download(row.Stock, period='1y', progress=False), thesis)
         df_sum['AI_Thesis'] = theses
     
