@@ -37,7 +37,7 @@ def create_master_infographic(ticker, row, info, fin, cf):
         ax.text(9.5, 12.6, f"{row['5Y_Perf']:.0f}% 5Y", ha='right', fontsize=20, fontweight='bold')
         ax.text(9.5, 12.1, f"{row['YTD_Perf']:.0f}% YTD", ha='right', fontsize=20, fontweight='bold')
 
-        # --- 1. FINANCIAL BARS ---
+        # --- 1. FINANCIAL BARS (FIXED RENDERING) ---
         ax.text(3.5, 11.2, "● Revenue  ● Net Income  ● FCF", fontsize=10, color='#666666')
         try:
             df_f = fin.T if fin.shape[0] < fin.shape[1] else fin
@@ -47,9 +47,11 @@ def create_master_infographic(ticker, row, info, fin, cf):
                 'N': df_f.get('Net Income', 0),
                 'F': df_c.get('Free Cash Flow', df_c.get('Operating Cash Flow', 0) + df_c.get('Capital Expenditure', 0))
             }).fillna(0).head(10)[::-1]
+            
             if not dp.empty:
                 x_pts = np.linspace(1.2, 7.5, len(dp))
-                norm = dp['R'].replace(0, 1).max()
+                # Auto-scale bars based on Max Revenue to ensure visibility
+                norm = dp['R'].max() if dp['R'].max() > 0 else 1.0
                 for i, (idx, v) in enumerate(dp.iterrows()):
                     ax.add_patch(Rectangle((x_pts[i]-0.22, 8.5), 0.15, (v['R']/norm)*2.2, color=BLACK))
                     ax.add_patch(Rectangle((x_pts[i]-0.07, 8.5), 0.15, (v['N']/norm)*2.2, color=TEAL))
@@ -57,14 +59,14 @@ def create_master_infographic(ticker, row, info, fin, cf):
                     ax.text(x_pts[i], 8.2, str(idx)[:4], ha='center', fontsize=9, color='#666666')
         except: pass
 
-        # --- 2. MARGINS (RIGHT) ---
+        # --- 2. MARGINS ---
         ax.text(8.3, 11.2, "Margins", fontsize=22, fontweight='bold', color=TEAL)
         draw_ring(ax, 8.1, 10.4, safe_float(info.get('grossMargins'))*100, "Gross", TEAL)
         draw_ring(ax, 8.1, 9.6, safe_float(info.get('ebitdaMargins'))*100, "EBIT", RED)
         draw_ring(ax, 8.1, 8.8, safe_float(info.get('profitMargins'))*100, "Net", TEAL)
         draw_ring(ax, 8.1, 8.0, 22, "FCF", RED)
 
-        # --- 3. KEY RATIOS (LEFT) ---
+        # --- 3. KEY RATIOS ---
         ax.text(0.5, 7.5, "Key ratios", fontsize=24, fontweight='bold')
         draw_ring(ax, 0.7, 6.8, safe_float(info.get('payoutRatio'))*100, "BuyBack", TEAL)
         draw_ring(ax, 0.7, 6.1, 107, "Net Retention", RED)
@@ -73,7 +75,7 @@ def create_master_infographic(ticker, row, info, fin, cf):
         ax.text(0.5, 4.1, f"• ${safe_float(info.get('totalCash'))/1e9:.1f}B Cash", fontsize=15, fontweight='bold')
         ax.text(0.5, 3.6, f"• {safe_float(info.get('forwardPE')):.0f} P/E 12 2028 P/E", fontsize=15, fontweight='bold')
 
-        # --- 4. 2028 GROWTH ESTIMATES (MIDDLE) ---
+        # --- 4. 2028 GROWTH ESTIMATES ---
         ax.text(4.0, 7.5, "2028 Growth Estimates", fontsize=22, fontweight='bold')
         draw_ring(ax, 4.2, 6.8, safe_float(info.get('revenueGrowth'))*100, "Revenue CAGR", TEAL)
         draw_ring(ax, 4.2, 6.1, safe_float(info.get('earningsGrowth'))*100, "EPS CAGR", TEAL)
@@ -94,15 +96,25 @@ def create_master_infographic(ticker, row, info, fin, cf):
         ax.text(4.0, 3.2, "Bull Case", fontsize=22, fontweight='bold')
         ax.text(4.0, 2.0, "• AI\n• Agentic AI\n• The Platform", fontsize=15)
 
-        # --- 8. PRICE TAG ---
-        tag = Polygon([[7.5, 6.5], [9.8, 6.5], [9.8, 0.2], [7.8, 0.2], [7.5, 3.5]], color=ORANGE_TAG)
-        ax.add_patch(tag); ax.add_patch(Circle((7.8, 3.5), 0.15, color=BG_WHITE))
-        ax.text(8.7, 5.5, "Price", ha='center', fontsize=18, fontweight='bold')
-        ax.text(8.7, 4.6, f"${row.Price:.0f}", ha='center', fontsize=55, fontweight='black')
-        ax.text(8.7, 3.6, "-14% OFF", ha='center', fontweight='bold', bbox=dict(facecolor='white', edgecolor='none'))
+        # --- 8. PRICE TAG (FIXED SHAPE & RING) ---
+        # Draw the tag shape with the pointed top
+        tag_pts = [[7.5, 6.2], [9.8, 6.2], [9.8, 0.2], [7.8, 0.2], [7.5, 3.5]]
+        ax.add_patch(Polygon(tag_pts, color=ORANGE_TAG, zorder=1))
+        
+        # Donut/Ring above price
+        ax.add_patch(Circle((7.8, 3.5), 0.15, color=BG_WHITE, zorder=2))
+        ax.add_patch(Wedge((7.8, 3.5), 0.15, 0, 360, width=0.04, color='#2c3e50', zorder=3))
+        
+        ax.text(8.7, 5.3, "Price", ha='center', fontsize=18, fontweight='bold')
+        ax.text(8.7, 4.4, f"${row.Price:.0f}", ha='center', fontsize=55, fontweight='black')
+        ax.text(8.7, 3.4, "-14% OFF", ha='center', fontweight='bold', bbox=dict(facecolor='white', edgecolor='none'))
         ax.text(8.7, 2.0, "$12 Low", ha='center', fontweight='bold', fontsize=12)
         ax.text(8.7, 1.4, "$17 High", ha='center', fontweight='bold', fontsize=12)
         ax.text(8.7, 0.8, "$14 Consensus", ha='center', fontweight='bold', fontsize=12)
+
+        # --- 9. DATESTAMP & FOOTER ---
+        now = datetime.now().strftime("%d. %B %Y")
+        ax.text(0.5, 0.3, f"Global Equity Briefing | {now}", fontsize=10, color='#666666')
 
         buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=300); buf.seek(0); plt.close()
         return buf
@@ -131,13 +143,13 @@ def run_scanner():
 
     df_full = pd.DataFrame(res).sort_values('Score', ascending=False).replace([np.inf, -np.inf], 0).fillna(0)
     
-    # --- GOOGLE SHEETS UPDATES (MANDATORY START) ---
+    # --- GOOGLE SHEETS UPDATES (MANDATORY) ---
     for sn in ["Core Screener", "Summary"]:
         ws = sh.worksheet(sn)
         out = df_full if sn == "Core Screener" else df_full.head(10)
         ws.clear(); ws.update([out.columns.tolist()] + out.astype(str).values.tolist())
 
-    # --- TELEGRAM IMAGES ---
+    # --- TELEGRAM RENDERING ---
     for i, (idx, r) in enumerate(df_full.head(5).iterrows()):
         to = yf.Ticker(r.Stock)
         img = create_master_infographic(r.Stock, r, to.info, to.financials, to.cashflow)
