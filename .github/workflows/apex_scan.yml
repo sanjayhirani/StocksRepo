@@ -26,4 +26,4 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }} # Your JSON creds string
-        run: python apex_scanner.py
+        run: python Apex_Stock_Scanner.py
