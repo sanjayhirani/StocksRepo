@@ -47,7 +47,7 @@ def create_master_infographic(ticker, row, info, fin, cf):
         ax.text(9.6, 12.7, f"{row['5Y_Perf']:.0f}% 5Y", ha='right', fontsize=28, fontweight='bold', color=GREEN if row['5Y_Perf'] > 0 else RED)
         ax.text(9.6, 12.2, f"{row['YTD_Perf']:.0f}% YTD", ha='right', fontsize=28, fontweight='bold', color=GREEN if row['YTD_Perf'] > 0 else RED)
 
-        # --- 1. FINANCIAL BARS (FIXED SCALE) ---
+        # --- 1. FINANCIAL BARS ---
         ax.text(5.0, 11.6, "● Revenue  ● Net Income  ● FCF", fontsize=18, color='#666666', ha='center', fontweight='bold')
         try:
             r_idx = [i for i in fin.index if 'Revenue' in i][0]
@@ -59,7 +59,7 @@ def create_master_infographic(ticker, row, info, fin, cf):
                 norm = dp['R'].max() if dp['R'].max() > 0 else 1.0
                 for i, (idx, v) in enumerate(dp.iterrows()):
                     ax.add_patch(Rectangle((x_pts[i]-0.28, 8.8), 0.2, (v['R']/norm)*2.3, color=BLACK))
-                    ax.add_patch(Rectangle((x_pts[i]-0.05, 0.2), (v['N']/norm)*2.3, color=TEAL)) # Logic check
+                    ax.add_patch(Rectangle((x_pts[i]-0.05, 8.8), 0.2, (v['N']/norm)*2.3, color=TEAL))
                     ax.add_patch(Rectangle((x_pts[i]+0.18, 8.8), 0.2, (v['F']/norm)*2.3, color=RED))
                     ax.text(x_pts[i], 8.4, str(idx.year), ha='center', fontsize=16, color='#333333', fontweight='bold')
         except: pass
@@ -112,7 +112,6 @@ def run_scanner():
     gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
     sh = gc.open("Stock Scanner")
     
-    # Data Fetching
     wiki = pd.read_html(urlopen(Request('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', headers={'User-Agent': 'v'})))[0]
     tkrs = [str(t).strip().replace('.', '-') for t in wiki['Symbol'].tolist()]
     data = yf.download(tkrs + ["SPY"], period="5y", group_by='ticker', progress=False)
@@ -130,7 +129,7 @@ def run_scanner():
 
     df_full = pd.DataFrame(res).sort_values('Score', ascending=False)
     
-    # MANDATORY: Update sheets before images
+    # UPDATE SHEETS
     for sn in ["Core Screener", "Summary"]:
         ws = sh.worksheet(sn)
         out = df_full if sn == "Core Screener" else df_full.head(10)
