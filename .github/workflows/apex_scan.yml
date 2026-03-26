@@ -1,4 +1,5 @@
 name: Apex Market Scan
+
 on:
   schedule:
     - cron: '0 14 * * 1-5'
@@ -16,19 +17,20 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install required fonts
+      - name: Install System Dependencies (Cairo & Fonts)
         run: |
-          run: |
           sudo apt-get update
           sudo apt-get install -y libcairo2-dev pkg-config python3-dev
           sudo apt-get install -y fonts-lato fonts-open-sans
           sudo fc-cache -f -v
-          
-      - name: Install Dependencies
+
+      - name: Install Python Dependencies
         run: |
           pip install --upgrade pip
-          pip install Pillow yfinance pandas numpy gspread oauth2client google-generativeai requests lxml svglib reportlab
-          
+          # Added cairosvg and lxml explicitly to support the V95 script
+          pip install Pillow yfinance pandas numpy gspread oauth2client \
+                      google-generativeai requests lxml svglib reportlab cairosvg
+
       - name: Run Apex Scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
