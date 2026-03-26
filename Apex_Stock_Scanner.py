@@ -3,22 +3,18 @@ import pandas as pd
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import io, requests, os, json, numpy as np
+import time
 from datetime import datetime
 from urllib.request import Request, urlopen
 import mplfinance as mpf
 import matplotlib.pyplot as plt
 from concurrent.futures import ThreadPoolExecutor
 
-# --- BROWSER BYPASS ---
-import requests as r_lib
-session = r_lib.Session()
-session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-})
-
+# --- CORE UTILS ---
 def fetch_ticker_info(t):
     try:
-        ticker = yf.Ticker(t, session=session)
+        # Let yfinance handle its own session/cookies internally
+        ticker = yf.Ticker(t)
         return t, ticker.info
     except: return t, {}
 
@@ -33,6 +29,7 @@ def calculate_rsi(series, period=14):
 def get_russell_1000():
     url = "https://en.wikipedia.org/wiki/Russell_1000_Index"
     try:
+        # Basic header for the Wikipedia fetch only
         wiki_tables = pd.read_html(urlopen(Request(url, headers={'User-Agent': 'Mozilla/5.0'})))
         for table in wiki_tables:
             if 'Symbol' in table.columns:
@@ -49,17 +46,19 @@ def run_scanner():
         gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
         sh = gc.open("Stock Scanner")
 
-        # 2. DATA ACQUISITION (With Session)
+        # 2. DATA ACQUISITION
         tkrs = get_russell_1000()
-        print(f"Bypassing Yahoo Security... Scanning {len(tkrs)} assets.")
+        print(f"Initiating Scan for {len(tkrs)} assets. Using native yfinance security...")
         
-        # Using session=session to prevent 401 Unauthorized
-        data = yf.download(tkrs, period="2y", group_by='ticker', progress=False, session=session)
+        # We NO LONGER pass a session here. yfinance handles it.
+        data = yf.download(tkrs, period="2y", group_by='ticker', progress=True)
 
-        # CHECK IF DATA IS EMPTY
         if data.empty:
-            print("❌ DATA FETCH FAILED: Yahoo blocked the request. Try again in 5 minutes.")
+            print("❌ DATA FETCH FAILED: Check connection or Yahoo status.")
             return
+
+        print("Data received. Fetching fundamental metadata...")
+        time.sleep(1) # Small buffer to prevent rate-limit flag
 
         with ThreadPoolExecutor(max_workers=10) as executor:
             info_results = list(executor.map(fetch_ticker_info, tkrs))
@@ -69,11 +68,8 @@ def run_scanner():
         results = []
         for t in tkrs:
             try:
-                # Security Gate: Ensure ticker exists in the download
                 if t not in data.columns.levels[0]: continue
                 df = data[t].dropna()
-                
-                # Minimum data check (200 SMA + RSI buffer)
                 if len(df) < 212: continue
                 
                 close = df['Close'].iloc[-1]
@@ -81,7 +77,6 @@ def run_scanner():
                 atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
                 df['RSI'] = calculate_rsi(df['Close'])
                 
-                # Ensure RSI window isn't empty before math operations
                 rsi_window = df['RSI'].tail(12).dropna()
                 if rsi_window.empty or len(rsi_window) < 1: continue 
 
@@ -125,7 +120,7 @@ def run_scanner():
         # 4. DATA PROCESSING
         final_df = pd.DataFrame(results).sort_values('Power_Score', ascending=False)
         if final_df.empty:
-            print("⚠️ No setups met the scoring criteria today.")
+            print("⚠️ No setups met criteria today.")
             return
 
         # 5. SHEET UPDATES
@@ -147,7 +142,6 @@ def run_scanner():
         core_df = pd.DataFrame(full_data)
         summary_df = core_df.head(5).drop(columns=['Gross_M', 'EBIT_M'])
 
-        # Update Sheets
         for name, d_frame in [("Summary", summary_df), ("Core Screener", core_df)]:
             ws = sh.worksheet(name)
             ws.clear()
