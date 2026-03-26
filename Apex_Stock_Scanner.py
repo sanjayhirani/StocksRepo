@@ -8,7 +8,7 @@ from urllib.request import Request, urlopen
 from svglib.svglib import svg2rlg
 from reportlab.graphics import renderPM
 
-# --- THE AUTHENTIC PATH SVG (CLEAN: NO ASTERISKS) ---
+# --- THE AUTHENTIC PATH SVG (ZERO ASTERISKS - VECTOR PRECISION) ---
 SVG_TEMPLATE = """
 <svg width="1200" height="1600" viewBox="0 0 1200 1600" fill="none" xmlns="http://www.w3.org/2000/svg">
   <rect width="1200" height="1600" fill="white"/>
@@ -43,6 +43,10 @@ SVG_TEMPLATE = """
     <circle r="22" stroke="#42cbf5" stroke-width="6" fill="none" />
     <text x="40" y="8" font-family="Arial" font-size="24" font-weight="bold" fill="black">6% BuyBack</text>
   </g>
+  <g transform="translate(90, 830)">
+    <circle r="22" stroke="#ff4b4b" stroke-width="6" fill="none" />
+    <text x="40" y="8" font-family="Arial" font-size="24" font-weight="bold" fill="black">107% Net Retention</text>
+  </g>
 
   <path d="M850 850 L950 750 H1150 V1480 H850 Z" fill="#ffbf7f" />
   <circle cx="1000" cy="785" r="15" fill="white" stroke="#d4af37" stroke-width="5"/>
@@ -68,7 +72,7 @@ def generate_infographic(ticker, row, info):
     svg_data = svg_data.replace("{{PERF_5Y}}", f"{row['5Y_Perf']:.0f}%").replace("{{PERF_YTD}}", f"{row['YTD_Perf']:.0f}%")
     svg_data = svg_data.replace("{{LOW}}", f"{row['Stop_Loss']:.2f}").replace("{{HIGH}}", f"{row['Target_1']:.2f}")
     svg_data = svg_data.replace("{{DATE}}", datetime.now().strftime('%d. %m. %Y'))
-
+    
     drawing = svg2rlg(io.BytesIO(svg_data.encode('utf-8')))
     buf = io.BytesIO()
     renderPM.drawToFile(drawing, buf, fmt="PNG")
@@ -77,18 +81,18 @@ def generate_infographic(ticker, row, info):
 
 def run_scanner():
     try:
-        # --- 1. FULL GOOGLE SHEETS AUTH & CONNECTION ---
+        # --- 1. GOOGLE SHEETS AUTH ---
         creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope))
         sh = gc.open("Stock Scanner")
         
-        # --- 2. COMPLETE DATA SCRAPE ---
+        # --- 2. DATA DOWNLOAD ---
         wiki = pd.read_html(urlopen(Request('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', headers={'User-Agent': 'v'})))[0]
         tkrs = [str(t).strip().replace('.', '-') for t in wiki['Symbol'].tolist()]
         data = yf.download(tkrs + ["SPY"], period="2y", group_by='ticker', progress=False)
         
-        # --- 3. FULL SCORING & FILTERING LOGIC ---
+        # --- 3. SCORING LOGIC (RS VS SPY) ---
         results = []
         spy_close = data['SPY']['Close']
         for t in tkrs:
@@ -97,11 +101,9 @@ def run_scanner():
                 if len(df) < 150: continue
                 
                 curr = df['Close'].iloc[-1]
-                # RS Score: Outperformance vs Benchmark (150d MA relative)
                 rel_strength = df['Close'] / spy_close.reindex(df.index)
                 rs_score = ((rel_strength.iloc[-1] / rel_strength.rolling(150).mean().iloc[-1]) - 1) * 100
                 
-                # Filters: Price > $10 and Volume liquid (>100k)
                 if curr < 10 or df['Volume'].iloc[-1] < 100000: continue
 
                 results.append({
@@ -114,12 +116,12 @@ def run_scanner():
 
         df_full = pd.DataFrame(results).sort_values('RS_Score', ascending=False)
         
-        # --- 4. FULL GOOGLE SHEETS UPDATE (ALL WORKBOOKS) ---
+        # --- 4. GOOGLE SHEETS UPDATE ---
         for sn in ["Core Screener", "Summary"]:
             ws = sh.worksheet(sn)
             ws.clear()
-            upload_df = df_full if sn == "Core Screener" else df_full.head(10)
-            ws.update([upload_df.columns.tolist()] + upload_df.astype(str).values.tolist())
+            up_df = df_full if sn == "Core Screener" else df_full.head(10)
+            ws.update([up_df.columns.tolist()] + up_df.astype(str).values.tolist())
 
         # --- 5. TELEGRAM DISPATCH ---
         bot_token, chat_id = os.environ.get('TELEGRAM_BOT_TOKEN'), os.environ.get('TELEGRAM_CHAT_ID')
@@ -130,8 +132,7 @@ def run_scanner():
                           files={'photo': ('i.png', img_buf)}, 
                           data={'chat_id': chat_id})
             
-    except Exception as e:
-        print(f"CRITICAL SYSTEM ERROR: {e}")
+    except Exception as e: print(f"Error: {e}")
 
 if __name__ == "__main__":
     run_scanner()
