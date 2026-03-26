@@ -55,86 +55,104 @@ def run_scanner():
                 sma200 = df['Close'].rolling(200).mean().iloc[-1]
                 atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
                 df['RSI'] = calculate_rsi(df['Close'])
-                current_rsi = df['RSI'].iloc[-1]
-
-                # --- APEX DUAL-SCAN LOGIC ---
                 
-                # OPTION A: LONG SETUP (Oversold in Uptrend)
-                if close > sma200 and current_rsi < 42:
+                # --- RSI DURATION & TIMING LOGIC ---
+                rsi_window = df['RSI'].tail(12)
+                
+                # TIMING MULTIPLIER (The Apex King Logic)
+                def get_timing_multiplier(days):
+                    if 3 <= days <= 5: return 1.0  # Golden Zone
+                    if days <= 2: return 0.5       # Too early (Falling Knife)
+                    if 6 <= days <= 8: return 0.7  # Fading
+                    return 0.2                     # Too late
+
+                # SETUP A: LONG (Oversold in Uptrend)
+                if close > sma200 and rsi_window.min() < 42:
+                    days_since = len(rsi_window) - rsi_window.argmin() - 1
+                    multiplier = get_timing_multiplier(days_since)
+                    
                     two_day_high = df['High'].iloc[-2:].max()
                     buy_trigger = round(two_day_high * 1.005, 2)
                     stop_loss = round(buy_trigger - (atr * 2.5), 2)
+                    
                     if (buy_trigger - stop_loss) / buy_trigger <= 0.12:
+                        raw_score = (42 - rsi_window.min()) * 5
                         results.append({
-                            'Stock': t, 'Squeeze': f"LONG (RSI:{int(current_rsi)})",
-                            'Power_Score': round(42 - current_rsi, 2),
-                            'Buy_At': buy_trigger, 'Stop_Loss': stop_loss, 'Target_1': round(buy_trigger * 1.25, 2),
-                            'Trade_Type': 'LONG', 'Price': round(close, 2), 'df': df
+                            'Stock': t, 'Type': 'LONG', 'RSI': int(df['RSI'].iloc[-1]),
+                            'Power_Score': round(raw_score * multiplier, 2),
+                            'Buy_At': buy_trigger, 'Sell_At': '', 'Days_Since': days_since,
+                            'Stop_Loss': stop_loss, 'Target_1': round(buy_trigger * 1.25, 2),
+                            'Price': round(close, 2), 'df': df
                         })
 
-                # OPTION B: SHORT SETUP (Overbought in Downtrend)
-                elif close < sma200 and current_rsi > 58:
+                # SETUP B: SHORT (Overbought in Downtrend)
+                elif close < sma200 and rsi_window.max() > 58:
+                    days_since = len(rsi_window) - rsi_window.argmax() - 1
+                    multiplier = get_timing_multiplier(days_since)
+                    
                     two_day_low = df['Low'].iloc[-2:].min()
                     sell_trigger = round(two_day_low * 0.995, 2)
                     stop_loss = round(sell_trigger + (atr * 2.5), 2)
+                    
                     if (stop_loss - sell_trigger) / sell_trigger <= 0.12:
+                        raw_score = (rsi_window.max() - 58) * 5
                         results.append({
-                            'Stock': t, 'Squeeze': f"SHORT (RSI:{int(current_rsi)})",
-                            'Power_Score': round(current_rsi - 58, 2),
-                            'Buy_At': sell_trigger, 'Stop_Loss': stop_loss, 'Target_1': round(sell_trigger * 0.85, 2),
-                            'Trade_Type': 'SHORT', 'Price': round(close, 2), 'df': df
+                            'Stock': t, 'Type': 'SHORT', 'RSI': int(df['RSI'].iloc[-1]),
+                            'Power_Score': round(raw_score * multiplier, 2),
+                            'Buy_At': '', 'Sell_At': sell_trigger, 'Days_Since': days_since,
+                            'Stop_Loss': stop_loss, 'Target_1': round(sell_trigger * 0.85, 2),
+                            'Price': round(close, 2), 'df': df
                         })
             except: continue
 
-        # Sort and take Top 10
+        # Sort by the new TIMED Power Score
         final_df = pd.DataFrame(results).sort_values('Power_Score', ascending=False)
         
-        # Build final output for Sheets
-        sheet_data = []
+        sheet_rows = []
         for _, row in final_df.iterrows():
             info = info_map.get(row.Stock, {})
             df_t = row.df
-            sheet_data.append({
-                'Stock': row.Stock, 'Squeeze': row.Squeeze, 'Power_Score': row.Power_Score,
+            sheet_rows.append({
+                'Stock': row.Stock, 'Squeeze': f"{row.Type} (RSI:{row.RSI})", 'Power_Score': row.Power_Score,
                 'Vol_Surge': f"{df_t['Volume'].iloc[-1]/df_t['Volume'].rolling(20).mean().iloc[-1]:.2f}x",
-                'Buy_At': row.Buy_At, 'Stop_Loss': row.Stop_Loss, 'Target_1': row.Target_1,
+                'Buy_At': row.Buy_At, 'Sell_At': row.Sell_At, 'RSI_Days': row.Days_Since,
+                'Stop_Loss': row.Stop_Loss, 'Target_1': row.Target_1,
                 'Gross_M': f"{info.get('grossMargins', 0)*100:.0f}%", 'EBIT_M': f"{info.get('ebitdaMargins', 0)*100:.0f}%",
                 'Mkt_Cap': f"{info.get('marketCap', 0)/1e9:.1f}B", 'Price': row.Price,
                 'YTD': round(((row.Price/df_t['Close'].iloc[0])-1)*100, 1)
             })
 
-        df_out = pd.DataFrame(sheet_data)
+        output_df = pd.DataFrame(sheet_rows)
 
         # 3. UPDATE SHEETS
         for sn in ["Summary", "Core Screener"]:
             ws = sh.worksheet(sn); ws.clear()
-            up_df = df_out.head(10) if sn == "Summary" else df_out
+            up_df = output_df.head(10) if sn == "Summary" else output_df
             ws.update([up_df.columns.tolist()] + up_df.astype(str).values.tolist())
 
-        # 4. TELEGRAM ALERTS (TOP 10 MIXED)
-        for _, row in df_out.head(10).iterrows():
+        # 4. TELEGRAM ALERTS
+        for _, row in output_df.head(10).iterrows():
             ticker = row.Stock
             hist = data[ticker].tail(100)
             apds = [mpf.make_addplot(hist['Close'].rolling(200).mean(), color='blue', width=1.5)]
-            
             buf = io.BytesIO()
             mpf.plot(hist, type='candle', addplot=apds, style='charles', savefig=buf)
             buf.seek(0)
 
-            emoji = "🎯 BUY" if "LONG" in row.Squeeze else "💀 SELL"
+            is_long = "LONG" in row.Squeeze
+            entry_price = row.Buy_At if is_long else row.Sell_At
+            emoji = "🎯 BUY" if is_long else "💀 SELL"
+
             caption = (
                 f"<b>{emoji}: {ticker}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"💰 <b>Last Price:</b> ${row.Price}\n"
-                f"⚔️ <b>{('Entry' if 'LONG' in emoji else 'Short At')}:</b> ${row.Buy_At}\n"
-                f"🛡️ <b>Stop Loss:</b> ${row.Stop_Loss}\n"
-                f"🏁 <b>Exit Target:</b> ${row.Target_1}\n"
+                f"💰 <b>Last:</b> ${row.Price} | ⏳ <b>Age:</b> {row.RSI_Days}d\n"
+                f"⚔️ <b>Trigger:</b> ${entry_price}\n"
+                f"🛡️ <b>Stop:</b> ${row.Stop_Loss} | 🏁 <b>Target:</b> ${row.Target_1}\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"📊 <i>Apex Score: {row.Power_Score} | {row.Squeeze}</i>"
             )
-            requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", 
-                          files={'photo': (f'{ticker}.png', buf)}, 
-                          data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
+            requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", files={'photo': (f'{ticker}.png', buf)}, data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
             plt.close('all')
 
     except Exception as e: print(f"FATAL ERROR: {e}")
