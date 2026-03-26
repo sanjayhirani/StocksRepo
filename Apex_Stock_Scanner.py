@@ -5,31 +5,27 @@ from oauth2client.service_account import ServiceAccountCredentials
 import io, requests, os, json, numpy as np
 from datetime import datetime
 from urllib.request import Request, urlopen
-import cairosvg
+import mplfinance as mpf
+import matplotlib.pyplot as plt
+from concurrent.futures import ThreadPoolExecutor
 
-# --- THE PATH MASTER TEMPLATE (LOCKED & VERIFIED) ---
-SVG_TEMPLATE = """
-<svg width="1200" height="1600" viewBox="0 0 1200 1600" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect width="1200" height="1600" fill="white"/>
-  <text x="60" y="160" font-family="Helvetica, Arial" font-size="160" font-weight="900" fill="#ff4b4b" style="letter-spacing:-5px">{{TICKER}}</text>
-  <text x="1140" y="80" font-family="Helvetica" font-size="36" font-weight="bold" fill="#333" text-anchor="end">{{MCAP}}</text>
-  <text x="1140" y="140" font-family="Helvetica" font-size="38" font-weight="bold" fill="#009933" text-anchor="end">▲ {{PERF_YTD}} YTD</text>
+# --- OPTIMIZED FUNDAMENTAL FETCHING ---
+def fetch_ticker_info(t):
+    """Worker function to fetch info in parallel"""
+    try:
+        ticker = yf.Ticker(t)
+        info = ticker.info
+        return t, info
+    except:
+        return t, {}
 
-  <text x="940" y="320" font-family="Helvetica" font-size="32" font-weight="bold" fill="#42cbf5">$ MARGINS</text>
-  <g transform="translate(930, 380)"><circle r="18" stroke="#42cbf5" stroke-width="5" fill="none" /><text x="35" y="10" font-family="Helvetica" font-size="26" font-weight="bold" fill="black">{{GROSS_M}} Gross</text></g>
-  <g transform="translate(930, 440)"><circle r="18" stroke="#ff4b4b" stroke-width="5" fill="none" /><text x="35" y="10" font-family="Helvetica" font-size="26" font-weight="bold" fill="black">{{EBIT_M}} EBIT</text></g>
-
-  <text x="450" y="720" font-family="Helvetica" font-size="42" font-weight="900" fill="#1a1a1a">2028 Growth Estimates</text>
-  <g transform="translate(480, 790)"><rect width="25" height="25" fill="#ff4b4b" rx="4"/><text x="45" y="20" font-family="Helvetica" font-size="28" font-weight="bold" fill="#333">{{REV_CAGR}} Revenue CAGR</text></g>
-  <g transform="translate(480, 850)"><rect width="25" height="25" fill="#42cbf5" rx="4"/><text x="45" y="20" font-family="Helvetica" font-size="28" font-weight="bold" fill="#333">{{EPS_CAGR}} EPS CAGR</text></g>
-
-  <path d="M850 900 L970 780 H1160 V1500 H850 Z" fill="#FFC107" fill-opacity="0.9" />
-  <circle cx="1010" cy="820" r="12" fill="white"/>
-  <text x="1005" y="930" font-family="Helvetica" font-size="28" font-weight="bold" fill="#664d00" text-anchor="middle">PRICE</text>
-  <text x="1005" y="1080" font-family="Helvetica" font-size="140" font-weight="900" fill="black" text-anchor="middle">${{PRICE}}</text>
-  <text x="60" y="1580" font-family="Helvetica" font-size="22" fill="#888">Global Equity Briefing | {{DATE}}</text>
-</svg>
-"""
+def get_russell_1000():
+    url = "https://en.wikipedia.org/wiki/Russell_1000_Index"
+    wiki_tables = pd.read_html(urlopen(Request(url, headers={'User-Agent': 'v'})))
+    for table in wiki_tables:
+        if 'Symbol' in table.columns:
+            return [str(t).strip().replace('.', '-') for t in table['Symbol'].tolist()]
+    return []
 
 def run_scanner():
     try:
@@ -38,18 +34,20 @@ def run_scanner():
         creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
         gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
         sh = gc.open("Stock Scanner")
-        
-        # 2. ROBUST TICKER SCRAPE (Russell 1000)
-        url = "https://en.wikipedia.org/wiki/Russell_1000_Index"
-        wiki_tables = pd.read_html(urlopen(Request(url, headers={'User-Agent': 'v'})))
-        tkrs = []
-        for table in wiki_tables:
-            if 'Symbol' in table.columns: tkrs = table['Symbol'].tolist(); break
-        
-        tkrs = [str(t).strip().replace('.', '-') for t in tkrs]
-        print(f"Scraping data for {len(tkrs)} stocks...")
+
+        # 2. BULK HISTORICAL DATA
+        tkrs = get_russell_1000()
+        print(f"Downloading history for {len(tkrs)} stocks...")
         data = yf.download(tkrs + ["SPY"], period="2y", group_by='ticker', progress=False)
         spy_close = data['SPY']['Close']
+
+        # 3. PARALLEL INFO FETCH (The Speed Booster)
+        print("Fetching fundamentals in parallel...")
+        info_map = {}
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            results_info = list(executor.map(fetch_ticker_info, tkrs))
+            for t, info in results_info:
+                info_map[t] = info
 
         results = []
         for t in tkrs:
@@ -57,50 +55,82 @@ def run_scanner():
                 df = data[t].dropna()
                 if len(df) < 150: continue
                 
-                # --- SQUEEZE & VOLUME LOGIC ---
+                # --- SQUEEZE & MOMENTUM LOGIC ---
                 sma = df['Close'].rolling(20).mean()
                 std = df['Close'].rolling(20).std()
                 upper_bb, lower_bb = sma + (std * 2), sma - (std * 2)
                 atr = (df['High']-df['Low']).rolling(14).mean()
+                
                 is_squeeze = 1 if (lower_bb.iloc[-1] > (sma.iloc[-1] - (atr.iloc[-1]*1.5))) and (upper_bb.iloc[-1] < (sma.iloc[-1] + (atr.iloc[-1]*1.5))) else 0
                 vol_ratio = df['Volume'].iloc[-1] / df['Volume'].rolling(20).mean().iloc[-1]
                 rs_val = ((df['Close'].iloc[-1]/spy_close.reindex(df.index).iloc[-1])/(df['Close'].iloc[-150]/spy_close.reindex(df.index).iloc[-150])-1)*100
                 
-                # Power Score: Squeeze(50) + RS(30) + Volume(20)
                 power_score = (is_squeeze * 50) + (min(rs_val, 30)) + (min(vol_ratio * 5, 20))
                 
-                info = yf.Ticker(t).info
+                info = info_map.get(t, {})
+                
+                # EXACT COLUMN ORDER FROM ORIGINAL SCRIPT
                 results.append({
-                    'Stock': t, 'Squeeze': "ACTIVE" if is_squeeze else "OFF", 'Power_Score': round(power_score, 2),
-                    'Vol_Surge': f"{vol_ratio:.2f}x", 'Buy_At': round(df['Close'].iloc[-1], 2),
-                    'Stop_Loss': round(df['Close'].iloc[-1] * 0.93, 2), 'Target_1': round(info.get('targetHighPrice', df['Close'].iloc[-1] * 1.25), 2),
-                    'Gross_M': f"{info.get('grossMargins', 0)*100:.0f}%", 'EBIT_M': f"{info.get('ebitdaMargins', 0)*100:.0f}%",
-                    'Mkt_Cap': f"{info.get('marketCap', 0)/1e9:.1f}B", 'Price': round(df['Close'].iloc[-1], 2),
+                    'Stock': t, 
+                    'Squeeze': "ACTIVE" if is_squeeze else "OFF", 
+                    'Power_Score': round(power_score, 2),
+                    'Vol_Surge': f"{vol_ratio:.2f}x", 
+                    'Buy_At': round(df['Close'].iloc[-1], 2),
+                    'Stop_Loss': round(df['Close'].iloc[-1] * 0.93, 2), 
+                    'Target_1': round(info.get('targetHighPrice', df['Close'].iloc[-1] * 1.25), 2),
+                    'Gross_M': f"{info.get('grossMargins', 0)*100:.0f}%", 
+                    'EBIT_M': f"{info.get('ebitdaMargins', 0)*100:.0f}%",
+                    'Mkt_Cap': f"{info.get('marketCap', 0)/1e9:.1f}B", 
+                    'Price': round(df['Close'].iloc[-1], 2),
                     'YTD': round(((df['Close'].iloc[-1]/df['Close'].iloc[0])-1)*100, 1)
                 })
             except: continue
 
         df_full = pd.DataFrame(results).sort_values('Power_Score', ascending=False)
         
-        # 3. UPDATE SHEETS (SUMMARY & CORE)
+        # 3. UPDATE SHEETS (MATCHING ORIGINAL FORMAT)
         for sn in ["Summary", "Core Screener"]:
             ws = sh.worksheet(sn)
             ws.clear()
             up_df = df_full.head(10) if sn == "Summary" else df_full
             ws.update([up_df.columns.tolist()] + up_df.astype(str).values.tolist())
 
-        # 4. DISPATCH TELEGRAM MESSAGES (TOP 5)
+        # 4. DISPATCH TELEGRAM CHARTS
         for _, row in df_full.head(5).iterrows():
-            svg = SVG_TEMPLATE.replace("{{TICKER}}", row.Stock).replace("{{PRICE}}", f"{row.Price:.0f}")
-            svg = svg.replace("{{MCAP}}", row.Mkt_Cap).replace("{{GROSS_M}}", row.Gross_M).replace("{{EBIT_M}}", row.EBIT_M)
-            svg = svg.replace("{{PERF_YTD}}", f"{row.YTD}%").replace("{{DATE}}", datetime.now().strftime('%d. %m. %Y'))
-            svg = svg.replace("{{REV_CAGR}}", "15%").replace("{{EPS_CAGR}}", "25%") # PATH Estimates
+            ticker_symbol = row.Stock
+            hist = data[ticker_symbol].tail(120)
             
-            png = cairosvg.svg2png(bytestring=svg.encode('utf-8'))
-            requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", files={'photo': ('i.png', io.BytesIO(png))}, data={'chat_id': chat})
-            print(f"Sent Telegram alert for {row.Stock}")
+            # Indicators for Chart
+            sma20 = hist['Close'].rolling(20).mean()
+            std20 = hist['Close'].rolling(20).std()
+            upper_bb, lower_bb = sma20 + (std20 * 2), sma20 - (std20 * 2)
+            sma200 = data[ticker_symbol]['Close'].rolling(200).mean().tail(120)
 
-        print("Final Status: Process Completed Successfully.")
+            apds = [
+                mpf.make_addplot(upper_bb, color='gray', width=0.8, linestyle='dashed'),
+                mpf.make_addplot(lower_bb, color='gray', width=0.8, linestyle='dashed'),
+                mpf.make_addplot(sma200, color='blue', width=1.5)
+            ]
+
+            buf = io.BytesIO()
+            mpf.plot(hist, type='candle', addplot=apds, style='charles', 
+                     volume=True, savefig=buf, tight_layout=True)
+            buf.seek(0)
+
+            caption = (
+                f"<b>{ticker_symbol}</b>\n"
+                f"💰 Price: ${row.Price}\n"
+                f"🎯 Buy: ${row.Buy_At} | Target: ${row.Target_1}\n"
+                f"🛑 Stop: ${row.Stop_Loss}\n"
+                f"📊 Power Score: {row.Power_Score}"
+            )
+
+            requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", 
+                          files={'photo': (f'{ticker_symbol}.png', buf)}, 
+                          data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
+            plt.close('all')
+
+        print("Process Completed Successfully.")
     except Exception as e: print(f"FATAL ERROR: {e}")
 
 if __name__ == "__main__":
