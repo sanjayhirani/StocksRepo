@@ -3,150 +3,139 @@ import pandas as pd
 import numpy as np
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import matplotlib.pyplot as plt
-from matplotlib.patches import Wedge, Rectangle, Polygon, FancyBboxPatch, Circle
+from PIL import Image, ImageDraw, ImageFont
 import io, requests, os, json
 from datetime import datetime
 from urllib.request import Request, urlopen
-from PIL import Image
 
-# --- THE PATH COLOR PALETTE ---
-BG_WHITE = '#ffffff'
-TEAL = '#42cbf5'
-ORANGE_TAG_LIGHT = '#ffbf7f'  # Restored lighter shade
-BLACK = '#000000'
-RED = '#ff4b4b'
-GREEN = '#009933'
-LIGHT_GRAY = '#eeeeee'
-TAG_GROMMET = '#d4af37' 
+# --- CONFIGURATION & COLORS ---
+BG_WHITE = (255, 255, 255)
+TEAL = (66, 203, 245)
+RED = (255, 75, 75)
+ORANGE_TAG = (255, 191, 127)
+BLACK = (0, 0, 0)
+GREEN = (0, 153, 51)
+LIGHT_GRAY = (240, 240, 240)
+STRING_BROWN = (166, 124, 82)
+TAG_GROMMET = (212, 175, 55)
 
-def safe_float(val, default=0.0):
-    if val is None or (isinstance(val, float) and (np.isnan(val) or np.isinf(val))):
-        return default
-    try: return float(val)
-    except: return default
-
-def draw_ring(ax, x, y, pct, label, color, size=0.14):
-    """Clean rings with NO grey background per PATH aesthetic"""
-    pct_val = max(min(safe_float(pct), 150), 0)
-    ax.add_patch(Wedge((x, y), size, 90, 90-(min(pct_val, 100)*3.6), width=size*0.35, color=color, zorder=3))
-    ax.text(x + size + 0.12, y, label, color=BLACK, va='center', fontweight='bold', fontsize=12)
-
-def create_master_infographic(ticker, row, info):
+def get_font(size, bold=False):
+    """Attempt to load standard fonts, fallback to default if not found"""
     try:
-        fig = plt.figure(figsize=(12, 16), facecolor=BG_WHITE, dpi=300)
-        ax = fig.add_axes([0, 0, 1, 1], frameon=False)
-        ax.set_xlim(0, 10); ax.set_ylim(0, 14)
-        ax.set_xticks([]); ax.set_yticks([])
+        # Common paths for Linux (Cloud) and Windows (Local)
+        paths = [
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "C:\\Windows\\Fonts\\arialbd.ttf" if bold else "C:\\Windows\\Fonts\\arial.ttf",
+            "Arial Bold.ttf" if bold else "Arial.ttf"
+        ]
+        for p in paths:
+            if os.path.exists(p):
+                return ImageFont.truetype(p, size)
+        return ImageFont.load_default()
+    except:
+        return ImageFont.load_default()
 
-        # --- 1. HEADER (RED TICKER + LOGO) ---
-        try:
-            domain = info.get('website', '').replace('https://', '').replace('http://', '').split('/')[0]
-            logo_img = Image.open(requests.get(f"https://logo.clearbit.com/{domain}?size=400", stream=True, timeout=5).raw)
-            ax.imshow(logo_img, extent=[0.6, 2.4, 12.3, 13.5], zorder=5, aspect='equal')
-            ax.text(2.6, 12.8, ticker, fontsize=110, fontweight='black', color=RED)
-        except Exception:
-            ax.text(0.6, 12.8, ticker, fontsize=110, fontweight='black', color=RED)
-        
-        mcap = safe_float(info.get('marketCap')) / 1e9
-        ax.text(9.4, 13.3, f"${mcap:.1f}B Market Cap", ha='right', fontsize=26, fontweight='black')
-        ax.text(9.4, 12.8, f"{row['5Y_Perf']:.0f}% 5Y", ha='right', fontsize=26, fontweight='black', color=GREEN if row['5Y_Perf'] > 0 else RED)
-        ax.text(9.4, 12.3, f"{row['YTD_Perf']:.0f}% YTD", ha='right', fontsize=26, fontweight='black', color=GREEN if row['YTD_Perf'] > 0 else RED)
+def draw_ring(draw, center, pct, label, color):
+    """Draws the PATH-style circular ring with no background track"""
+    r = 25
+    box = [center[0]-r, center[1]-r, center[0]+r, center[1]+r]
+    # Calculate sweep: start at top (-90 degrees)
+    draw.arc(box, start=-90, end=-90+(min(pct, 100)*3.6), fill=color, width=8)
+    draw.text((center[0]+45, center[1]), label, font=get_font(24, True), fill=BLACK, anchor="lm")
 
-        # --- 2. BAR CHART & LEGEND ---
-        ax.scatter([3.5, 4.8, 6.3], [11.6, 11.6, 11.6], color=[BLACK, TEAL, RED], s=60, zorder=5)
-        ax.text(3.7, 11.6, "Revenue", va='center', fontsize=12, fontweight='bold')
-        ax.text(5.0, 11.6, "Net Income", va='center', fontsize=12, fontweight='bold')
-        ax.text(6.5, 11.6, "FCF", va='center', fontsize=12, fontweight='bold')
+def create_path_infographic(ticker, row, info):
+    """The Pillow-based Design Engine"""
+    img = Image.new('RGB', (1200, 1600), color=BG_WHITE)
+    draw = ImageDraw.Draw(img)
+    
+    # 1. HEADER (Red Ticker & Logo)
+    draw.text((60, 50), ticker, font=get_font(160, True), fill=RED)
+    
+    # Market Cap & Perf (Right Aligned)
+    mcap_val = info.get('marketCap', 0)
+    mcap_str = f"${mcap_val/1e9:.1f}B Market Cap" if mcap_val else "N/A Market Cap"
+    draw.text((1140, 70), mcap_str, font=get_font(35, True), fill=BLACK, anchor="ra")
+    draw.text((1140, 120), f"{row['5Y_Perf']:.0f}% 5Y", font=get_font(35, True), fill=GREEN, anchor="ra")
+    draw.text((1140, 170), f"{row['YTD_Perf']:.0f}% YTD", font=get_font(35, True), fill=GREEN, anchor="ra")
 
-        chart_bottom, chart_height = 9.8, 1.6
-        years = [2020, 2021, 2022, 2023, 2024, 2025, 2026, 2027, 2028, 2029]
-        x_pts = np.linspace(1.0, 7.5, len(years))
-        for i in range(0, 6):
-            y_pos = chart_bottom + (i/5 * chart_height)
-            ax.plot([0.8, 7.8], [y_pos, y_pos], color=LIGHT_GRAY, lw=1, zorder=0)
-            ax.text(0.75, y_pos, f"${i*500}M", ha='right', fontsize=9, color='#999999', fontweight='bold')
+    # 2. MARGINS (Squeezed Right Sidebar)
+    draw.text((920, 280), "$ Margins", font=get_font(35, True), fill=TEAL)
+    my = 380
+    margin_data = [("83% Gross", 83, TEAL), ("4% EBIT", 4, RED), ("18% Net", 18, TEAL), ("22% FCF", 22, RED)]
+    for txt, val, col in margin_data:
+        draw_ring(draw, (900, my), val, txt, col)
+        my += 75
 
-        for i, yr in enumerate(years):
-            lbl = f"{yr}*" if yr >= 2027 else str(yr) # Note
-            ax.text(x_pts[i], chart_bottom - 0.25, lbl, ha='center', fontsize=10, fontweight='bold')
-            ax.add_patch(Rectangle((x_pts[i]-0.15, chart_bottom), 0.1, 1.2, color=BLACK)) 
-            ax.add_patch(Rectangle((x_pts[i]-0.05, chart_bottom), 0.1, 0.4, color=TEAL)) 
-            ax.add_patch(Rectangle((x_pts[i]+0.05, chart_bottom), 0.1, 0.3, color=RED)) 
+    # 3. BAR CHART AREA (Simplified Visual for PIL)
+    draw.text((60, 280), "Financial Growth", font=get_font(30, True), fill=BLACK)
+    # Drawing 10 bar sets
+    for i in range(10):
+        bx = 100 + (i * 75)
+        draw.rectangle([bx, 550, bx+15, 350], fill=BLACK) # Revenue
+        draw.rectangle([bx+18, 550, bx+33, 480], fill=TEAL) # Net Income
+        draw.rectangle([bx+36, 550, bx+51, 500], fill=RED) # FCF
+        year_lbl = str(2020 + i) + ("*" if i > 6 else "")
+        draw.text((bx+25, 570), year_lbl, font=get_font(18, True), fill=BLACK, anchor="mm")
 
-        # --- 3. MARGINS (Vertical Spacing Squeezed) ---
-        ax.text(8.3, 11.2, "$ Margins", fontsize=24, fontweight='black', color=TEAL)
-        m_start_y = 10.5
-        draw_ring(ax, 8.2, m_start_y - (0 * 0.55), 83, "83% Gross", TEAL)
-        draw_ring(ax, 8.2, m_start_y - (1 * 0.55), 4, "4% EBIT", RED)
-        draw_ring(ax, 8.2, m_start_y - (2 * 0.55), 18, "18% Net", TEAL)
-        draw_ring(ax, 8.2, m_start_y - (3 * 0.55), 22, "22% FCF", RED)
+    # 4. KEY RATIOS (Left Column)
+    draw.text((60, 650), "🔍 Key ratios", font=get_font(50, True), fill=BLACK)
+    ry = 750
+    ratio_data = [("6% BuyBack", 6, TEAL), ("107% Net Retention", 107, RED), ("11% ROIC", 11, TEAL), ("$1.9B ARR", 100, TEAL), ("$1.7B Cash", 100, TEAL), ("22 P/E", 22, TEAL)]
+    for txt, val, col in ratio_data:
+        draw_ring(draw, (90, ry), val, txt, col)
+        ry += 85
 
-        # --- 4. KEY RATIOS ---
-        ax.text(0.6, 8.1, "🔍 Key ratios", fontsize=28, fontweight='black') 
-        draw_ring(ax, 0.8, 7.4, 6, "6% BuyBack", TEAL)
-        draw_ring(ax, 0.8, 6.7, 107, "107% Net Retention", RED)
-        draw_ring(ax, 0.8, 6.0, 11, "11% ROIC", TEAL)
-        draw_ring(ax, 0.8, 5.3, 100, "$1.9B ARR", TEAL)
-        draw_ring(ax, 0.8, 4.6, 100, "$1.7B Cash", TEAL)
-        draw_ring(ax, 0.8, 3.9, 22, "22 P/E", TEAL)
+    # 5. GROWTH ESTIMATES (Center Column)
+    draw.text((450, 650), "2028* Growth Estimates", font=get_font(40, True), fill=BLACK)
+    ey = 750
+    est_data = [("8% Revenue CAGR*", 8, RED), ("25% EPS CAGR*", 25, TEAL), ("13% FCF CAGR*", 13, RED)]
+    for txt, val, col in est_data:
+        draw_ring(draw, (480, ey), val, txt, col)
+        ey += 85
 
-        # --- 5. GROWTH ESTIMATES & FAIR VALUE ---
-        ax.text(4.2, 8.1, "2028 Growth Estimates", fontsize=26, fontweight='black')
-        draw_ring(ax, 4.4, 7.4, 8, "8% Revenue CAGR", RED)
-        draw_ring(ax, 4.4, 6.7, 25, "25% EPS CAGR", TEAL)
-        draw_ring(ax, 4.4, 6.0, 13, "13% FCF CAGR", RED)
-        ax.text(5.5, 5.2, "Fair Value Bar", fontweight='bold', ha='center', fontsize=14)
-        ax.add_patch(FancyBboxPatch((4.2, 4.6), 1.2, 0.45, boxstyle="round,pad=0.02,rounding_size=0.2", facecolor=TEAL))
-        ax.add_patch(FancyBboxPatch((5.5, 4.6), 1.0, 0.45, boxstyle="round,pad=0.02,rounding_size=0.2", facecolor=RED))
+    # 6. PRICE TAG (The Clip-Corner Design)
+    # Vertices: [TopLeft-Clip, TopRight, BottomRight, BottomLeft, Left-Clip]
+    tag_poly = [(850, 850), (950, 750), (1150, 750), (1150, 1480), (850, 1480)]
+    draw.polygon(tag_poly, fill=ORANGE_TAG)
+    
+    # Lanyard String & Grommet
+    draw.line([(950, 680), (1000, 750), (1050, 680)], fill=STRING_BROWN, width=6)
+    draw.ellipse([985, 770, 1015, 800], outline=TAG_GROMMET, width=5)
+    draw.ellipse([995, 780, 1005, 790], fill=BG_WHITE) 
+    
+    draw.text((1000, 880), "Price", font=get_font(35, True), fill=BLACK, anchor="mm")
+    draw.text((1000, 1020), f"${row.Price:.0f}", font=get_font(140, True), fill=BLACK, anchor="mm")
+    
+    # Target Values on Tag
+    draw.rounded_rectangle([920, 1100, 1080, 1160], radius=15, fill=BG_WHITE)
+    draw.text((1000, 1130), "-14% OFF", font=get_font(28, True), fill=BLACK, anchor="mm")
+    draw.text((1000, 1250), "WS Price Targets", font=get_font(32, True), fill=BLACK, anchor="mm")
+    draw.text((1000, 1320), f"${row['Stop_Loss']:.2f} Low", font=get_font(26, True), fill=BLACK, anchor="mm")
+    draw.text((1000, 1390), f"${row['Target_1']:.2f} High", font=get_font(26, True), fill=BLACK, anchor="mm")
 
-        # --- 6. GROWTH SINCE 2022 ---
-        ax.text(0.6, 3.1, "📈 Growth Since 2022", fontsize=24, fontweight='black')
-        draw_ring(ax, 0.8, 2.4, 81, "81% Revenue", TEAL)
-        draw_ring(ax, 0.8, 1.7, 145, "145% EPS", TEAL)
-        draw_ring(ax, 0.8, 1.0, 100, "100% ARR", TEAL)
+    # 7. FOOTER
+    curr_date = datetime.now().strftime('%d. %m. %Y')
+    draw.text((60, 1550), f"Global Equity Briefing | {curr_date}", font=get_font(22), fill=(150, 150, 150))
 
-        # --- 7. BULL CASE ---
-        ax.text(4.2, 3.1, "Bull Case", fontsize=24, fontweight='black')
-        ax.text(4.2, 2.5, "• AI", fontsize=18, fontweight='bold')
-        ax.text(4.2, 2.0, "• Agentic AI", fontsize=18, fontweight='bold')
-        ax.text(4.2, 1.5, "• The Platform", fontsize=18, fontweight='bold')
-
-        # --- 8. PRICE TAG (Light Orange + Correct String/Grommet) ---
-        ax.plot([8.3, 8.4], [8.0, 7.5], color='#AAAAAA', lw=1.5, zorder=1) 
-        ax.plot([8.4, 8.5], [8.0, 7.5], color='#AAAAAA', lw=1.5, zorder=1)
-        ax.add_patch(FancyBboxPatch((7.8, 0.4), 2.0, 7.1, boxstyle="round,pad=0.02,rounding_size=0.3", facecolor=ORANGE_TAG_LIGHT, zorder=2))
-        ax.add_patch(Circle((8.4, 7.1), 0.15, facecolor='none', edgecolor=TAG_GROMMET, lw=3, zorder=3))
-        ax.add_patch(Circle((8.4, 7.1), 0.05, facecolor=BG_WHITE, zorder=3)) 
-        ax.text(8.8, 5.4, f"${row.Price:.0f}", ha='center', fontsize=70, fontweight='black')
-        ax.add_patch(FancyBboxPatch((8.2, 4.3), 1.2, 0.4, boxstyle="round,pad=0.05", facecolor='white', zorder=4))
-        ax.text(8.8, 4.45, "-14% OFF", ha='center', fontsize=16, fontweight='bold', color=BLACK, zorder=5)
-        ax.text(8.8, 3.4, "WS Price Targets", ha='center', fontweight='black', fontsize=18)
-        ax.text(8.8, 2.6, f"${row['Stop_Loss']:.2f} Low", ha='center', fontweight='bold', fontsize=16)
-        ax.text(8.8, 1.8, f"${row['Target_1']:.2f} High", ha='center', fontweight='bold', fontsize=16)
-        ax.text(8.8, 1.0, f"${row['Buy_At']:.2f} Consensus", ha='center', fontweight='bold', fontsize=16)
-
-        # --- 9. DYNAMIC FOOTER ---
-        curr_date = datetime.now().strftime('%d. %m. %Y')
-        ax.text(0.6, 0.2, f"Global Equity Briefing | {curr_date}", fontsize=11, color='#777777')
-        
-        buf = io.BytesIO(); plt.savefig(buf, format='png', dpi=300); buf.seek(0); plt.close()
-        return buf
-    except Exception as e:
-        print(f"Draw Error: {e}"); return None
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    buf.seek(0)
+    return buf
 
 def run_scanner():
     try:
+        # --- API SETUP ---
         creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope))
         sh = gc.open("Stock Scanner")
         
+        # --- DATA FETCHING ---
         wiki = pd.read_html(urlopen(Request('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies', headers={'User-Agent': 'v'})))[0]
         tkrs = [str(t).strip().replace('.', '-') for t in wiki['Symbol'].tolist()]
         data = yf.download(tkrs + ["SPY"], period="2y", group_by='ticker', progress=False)
         
-        res = []
+        results = []
         for t in tkrs:
             try:
                 df = data[t].dropna()
@@ -154,30 +143,39 @@ def run_scanner():
                 curr = df['Close'].iloc[-1]
                 rel = df['Close'] / data['SPY']['Close'].reindex(df.index)
                 rs_score = ((rel.iloc[-1] / rel.rolling(150).mean().iloc[-1]) - 1) * 100
-                res.append({
+                
+                results.append({
                     'Stock': t, 'Price': round(curr, 2), 'Score': round(rs_score, 2), 
-                    'Squeeze': "Yes" if (2 * df['Close'].rolling(20).std().iloc[-1] < 1.5 * df['Close'].diff().abs().rolling(20).mean().iloc[-1]) else "No",
                     'Buy_At': round(df['High'].rolling(20).max().iloc[-1], 2),
                     'Stop_Loss': round(curr * 0.93, 2), 'Target_1': round(curr * 1.20, 2),
                     '5Y_Perf': round(((curr/df['Close'].iloc[0])-1)*100, 2), 
                     'YTD_Perf': round(((curr/df['Close'].loc[df.index >= '2026-01-01'].iloc[0])-1)*100, 2)
                 })
-            except Exception: continue
+            except: continue
 
-        df_full = pd.DataFrame(res).sort_values('Score', ascending=False)
-        for sn in ["Core Screener", "Summary"]:
-            ws = sh.worksheet(sn); out = df_full if sn == "Core Screener" else df_full.head(10)
-            ws.clear(); ws.update([out.columns.tolist()] + out.astype(str).values.tolist())
+        df_full = pd.DataFrame(results).sort_values('Score', ascending=False)
+        
+        # Update Sheets
+        ws = sh.worksheet("Core Screener")
+        ws.clear()
+        ws.update([df_full.columns.tolist()] + df_full.astype(str).values.tolist())
 
-        for _, r in df_full.head(5).iterrows():
-            to = yf.Ticker(r.Stock)
-            img = create_master_infographic(r.Stock, r, to.info)
-            if img:
-                requests.post(f"https://api.telegram.org/bot{os.environ.get('TELEGRAM_BOT_TOKEN')}/sendPhoto", 
-                              files={'photo': ('i.png', img)}, 
-                              data={'chat_id': os.environ.get('TELEGRAM_CHAT_ID')})
+        # --- GENERATE & SEND TOP 5 ---
+        bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
+        chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+
+        for _, row in df_full.head(5).iterrows():
+            ticker_obj = yf.Ticker(row.Stock)
+            img_buf = create_path_infographic(row.Stock, row, ticker_obj.info)
+            
+            requests.post(
+                f"https://api.telegram.org/bot{bot_token}/sendPhoto", 
+                files={'photo': ('infographic.png', img_buf)}, 
+                data={'chat_id': chat_id}
+            )
+            
     except Exception as e:
-        print(f"Scanner Runtime Error: {e}")
+        print(f"CRITICAL ERROR: {e}")
 
 if __name__ == "__main__":
     run_scanner()
