@@ -4,51 +4,43 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import io, requests, os, json, numpy as np
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from urllib.request import Request, urlopen
 import mplfinance as mpf
 import matplotlib.pyplot as plt
 from concurrent.futures import ThreadPoolExecutor
 
-# --- CACHE UTILS ---
+# --- CACHE CONFIG ---
 CACHE_DIR = "data_cache"
 CACHE_FILE = os.path.join(CACHE_DIR, "russell_1000_2y.pkl")
 
 def get_cached_data(tkrs):
     if not os.path.exists(CACHE_DIR):
         os.makedirs(CACHE_DIR)
-
     if os.path.exists(CACHE_FILE):
         try:
             existing_data = pd.read_pickle(CACHE_FILE)
             last_date = existing_data.index.max()
-            
-            # If the cache is from today, just return it
             if last_date.date() >= datetime.now().date():
                 print("✅ Cache is up to date.")
                 return existing_data
-            
             print(f"📜 Updating cache from {last_date.date()}...")
-            # Download only the new data (delta)
             new_data = yf.download(tkrs, start=last_date, group_by='ticker', progress=True)
-            
             if not new_data.empty:
                 combined = pd.concat([existing_data, new_data])
-                # Remove duplicates and keep the last 2 years
                 combined = combined[~combined.index.duplicated(keep='last')].sort_index()
                 start_cutoff = combined.index.max() - pd.DateOffset(years=2)
                 final_data = combined[combined.index >= start_cutoff]
                 final_data.to_pickle(CACHE_FILE)
                 return final_data
         except Exception as e:
-            print(f"⚠️ Cache Corrupt: {e}. Re-downloading...")
-
-    print("🚀 Initializing full 2-year download (This will take time)...")
+            print(f"⚠️ Cache Load Error: {e}. Starting fresh...")
+    
+    print("🚀 Initializing full 2-year download...")
     final_data = yf.download(tkrs, period="2y", group_by='ticker', progress=True)
     final_data.to_pickle(CACHE_FILE)
     return final_data
 
-# --- SCANNER UTILS ---
 def fetch_ticker_info(t):
     try:
         ticker = yf.Ticker(t)
@@ -75,40 +67,47 @@ def get_russell_1000():
 
 def run_scanner():
     try:
-        # 1. SETUP
         token = os.environ.get('TELEGRAM_BOT_TOKEN')
         chat = os.environ.get('TELEGRAM_CHAT_ID')
         creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
         gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
         sh = gc.open("Stock Scanner")
 
-        # 2. DATA ACQUISITION (CACHED)
         tkrs = get_russell_1000()
         data = get_cached_data(tkrs)
 
         if data.empty:
-            print("❌ DATA FETCH FAILED")
+            print("❌ Critical: Dataframe is empty.")
             return
 
         with ThreadPoolExecutor(max_workers=10) as executor:
             info_results = list(executor.map(fetch_ticker_info, tkrs))
             info_map = {t: info for t, info in info_results}
 
-        # 3. ANALYSIS LOOP
         results = []
+        # Multi-index safe check
+        available_tickers = data.columns.levels[0] if isinstance(data.columns, pd.MultiIndex) else data.columns
+
         for t in tkrs:
             try:
-                if t not in data.columns.levels[0]: continue
+                if t not in available_tickers: continue
+                
+                # DATA GUARD 1: Drop NaNs and ensure sufficient history
                 df = data[t].dropna(subset=['Close', 'High', 'Low'])
-                if len(df) < 212: continue
+                if df.empty or len(df) < 212: continue
                 
                 close = df['Close'].iloc[-1]
                 sma200 = df['Close'].rolling(200).mean().iloc[-1]
                 atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
-                df['RSI'] = calculate_rsi(df['Close'])
                 
+                df['RSI'] = calculate_rsi(df['Close'])
                 rsi_window = df['RSI'].tail(12).dropna()
                 if rsi_window.empty: continue 
+
+                # DATA GUARD 2: Explicitly check the trigger slice for empty arrays
+                recent_slice = df.iloc[-2:]
+                if recent_slice['High'].isnull().all() or recent_slice['Low'].isnull().all():
+                    continue
 
                 def get_timing_multiplier(days):
                     if 3 <= days <= 5: return 1.0
@@ -121,10 +120,7 @@ def run_scanner():
                     days_since = len(rsi_window) - rsi_window.argmin() - 1
                     multiplier = get_timing_multiplier(days_since)
                     
-                    recent_highs = df['High'].iloc[-2:].dropna()
-                    if recent_highs.empty: continue
-                    
-                    buy_trigger = round(recent_highs.max() * 1.005, 2)
+                    buy_trigger = round(recent_slice['High'].max() * 1.005, 2)
                     stop_loss = round(buy_trigger - (atr * 2.5), 2)
                     
                     if (buy_trigger - stop_loss) / buy_trigger <= 0.12:
@@ -141,10 +137,7 @@ def run_scanner():
                     days_since = len(rsi_window) - rsi_window.argmax() - 1
                     multiplier = get_timing_multiplier(days_since)
                     
-                    recent_lows = df['Low'].iloc[-2:].dropna()
-                    if recent_lows.empty: continue
-
-                    sell_trigger = round(recent_lows.min() * 0.995, 2)
+                    sell_trigger = round(recent_slice['Low'].min() * 0.995, 2)
                     stop_loss = round(sell_trigger + (atr * 2.5), 2)
                     
                     if (stop_loss - sell_trigger) / sell_trigger <= 0.12:
@@ -155,12 +148,12 @@ def run_scanner():
                             'Stop_Loss': stop_loss, 'Target_1': round(sell_trigger * 0.85, 2),
                             'Price': round(close, 2), 'df': df
                         })
-            except: continue
+            except Exception: continue
 
         # 4. DATA PROCESSING
         final_df = pd.DataFrame(results).sort_values('Power_Score', ascending=False)
         if final_df.empty:
-            print("⚠️ No setups found.")
+            print("⚠️ No valid setups found after filtering bad data.")
             return
 
         full_data = []
@@ -181,7 +174,7 @@ def run_scanner():
         core_df = pd.DataFrame(full_data)
         summary_df = core_df.head(5).drop(columns=['Gross_M', 'EBIT_M'])
 
-        # 5. SHEET UPDATES
+        # Update Sheets
         for name, d_frame in [("Summary", summary_df), ("Core Screener", core_df)]:
             ws = sh.worksheet(name)
             ws.clear()
@@ -189,15 +182,17 @@ def run_scanner():
 
         # 6. TELEGRAM ALERTS
         for _, row in core_df.head(5).iterrows():
-            ticker = row.Stock
-            hist = data[ticker].tail(100)
+            ticker, df_t = row.Stock, row.df
+            hist = df_t.tail(100)
             apds = [mpf.make_addplot(hist['Close'].rolling(200).mean(), color='blue', width=1.5)]
             buf = io.BytesIO()
             mpf.plot(hist, type='candle', addplot=apds, style='charles', savefig=buf)
             buf.seek(0)
+            
             is_long = "LONG" in row.Squeeze
             entry_price = row.Buy_At if is_long else row.Sell_At
-            emoji, prime_tag = ("🎯 BUY", "\n🔥 <b>PRIME SNIPER SETUP</b>") if row.RSI_Days == 3 else (("🎯 BUY" if is_long else "💀 SELL"), "")
+            emoji = "🎯 BUY" if is_long else "💀 SELL"
+            prime_tag = "\n🔥 <b>PRIME SNIPER SETUP</b>" if row.RSI_Days == 3 else ""
 
             caption = (
                 f"<b>{emoji}: {ticker}</b>{prime_tag}\n"
