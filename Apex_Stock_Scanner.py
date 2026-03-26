@@ -9,10 +9,16 @@ import mplfinance as mpf
 import matplotlib.pyplot as plt
 from concurrent.futures import ThreadPoolExecutor
 
-# --- CORE UTILS ---
+# --- BROWSER BYPASS ---
+import requests as r_lib
+session = r_lib.Session()
+session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+})
+
 def fetch_ticker_info(t):
     try:
-        ticker = yf.Ticker(t)
+        ticker = yf.Ticker(t, session=session)
         return t, ticker.info
     except: return t, {}
 
@@ -27,7 +33,7 @@ def calculate_rsi(series, period=14):
 def get_russell_1000():
     url = "https://en.wikipedia.org/wiki/Russell_1000_Index"
     try:
-        wiki_tables = pd.read_html(urlopen(Request(url, headers={'User-Agent': 'v'})))
+        wiki_tables = pd.read_html(urlopen(Request(url, headers={'User-Agent': 'Mozilla/5.0'})))
         for table in wiki_tables:
             if 'Symbol' in table.columns:
                 return [str(t).strip().replace('.', '-') for t in table['Symbol'].tolist()]
@@ -37,14 +43,23 @@ def get_russell_1000():
 def run_scanner():
     try:
         # 1. SETUP
-        token, chat = os.environ.get('TELEGRAM_BOT_TOKEN'), os.environ.get('TELEGRAM_CHAT_ID')
+        token = os.environ.get('TELEGRAM_BOT_TOKEN')
+        chat = os.environ.get('TELEGRAM_CHAT_ID')
         creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
         gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
         sh = gc.open("Stock Scanner")
 
-        # 2. DATA ACQUISITION
+        # 2. DATA ACQUISITION (With Session)
         tkrs = get_russell_1000()
-        data = yf.download(tkrs, period="2y", group_by='ticker', progress=False)
+        print(f"Bypassing Yahoo Security... Scanning {len(tkrs)} assets.")
+        
+        # Using session=session to prevent 401 Unauthorized
+        data = yf.download(tkrs, period="2y", group_by='ticker', progress=False, session=session)
+
+        # CHECK IF DATA IS EMPTY
+        if data.empty:
+            print("❌ DATA FETCH FAILED: Yahoo blocked the request. Try again in 5 minutes.")
+            return
 
         with ThreadPoolExecutor(max_workers=10) as executor:
             info_results = list(executor.map(fetch_ticker_info, tkrs))
@@ -54,16 +69,21 @@ def run_scanner():
         results = []
         for t in tkrs:
             try:
-                if t not in data or data[t].empty: continue
+                # Security Gate: Ensure ticker exists in the download
+                if t not in data.columns.levels[0]: continue
                 df = data[t].dropna()
+                
+                # Minimum data check (200 SMA + RSI buffer)
                 if len(df) < 212: continue
                 
                 close = df['Close'].iloc[-1]
                 sma200 = df['Close'].rolling(200).mean().iloc[-1]
                 atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
                 df['RSI'] = calculate_rsi(df['Close'])
+                
+                # Ensure RSI window isn't empty before math operations
                 rsi_window = df['RSI'].tail(12).dropna()
-                if rsi_window.empty: continue 
+                if rsi_window.empty or len(rsi_window) < 1: continue 
 
                 def get_timing_multiplier(days):
                     if 3 <= days <= 5: return 1.0
@@ -100,14 +120,15 @@ def run_scanner():
                             'Stop_Loss': stop_loss, 'Target_1': round(sell_trigger * 0.85, 2),
                             'Price': round(close, 2), 'df': df
                         })
-            except: continue
+            except Exception: continue
 
         # 4. DATA PROCESSING
         final_df = pd.DataFrame(results).sort_values('Power_Score', ascending=False)
-        if final_df.empty: return
+        if final_df.empty:
+            print("⚠️ No setups met the scoring criteria today.")
+            return
 
         # 5. SHEET UPDATES
-        # Create Full Data for Core Screener (Top 50)
         full_data = []
         for _, row in final_df.head(50).iterrows():
             info = info_map.get(row.Stock, {})
@@ -124,18 +145,13 @@ def run_scanner():
             })
         
         core_df = pd.DataFrame(full_data)
-        
-        # Create Cleaned Summary Data (Top 5) - Excluding Margins
         summary_df = core_df.head(5).drop(columns=['Gross_M', 'EBIT_M'])
 
         # Update Sheets
-        ws_sum = sh.worksheet("Summary")
-        ws_sum.clear()
-        ws_sum.update([summary_df.columns.tolist()] + summary_df.astype(str).values.tolist())
-
-        ws_core = sh.worksheet("Core Screener")
-        ws_core.clear()
-        ws_core.update([core_df.columns.tolist()] + core_df.astype(str).values.tolist())
+        for name, d_frame in [("Summary", summary_df), ("Core Screener", core_df)]:
+            ws = sh.worksheet(name)
+            ws.clear()
+            ws.update([d_frame.columns.tolist()] + d_frame.astype(str).values.tolist())
 
         # 6. TELEGRAM ALERTS (Top 5)
         for _, row in core_df.head(5).iterrows():
