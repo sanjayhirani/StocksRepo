@@ -9,15 +9,17 @@ import mplfinance as mpf
 import matplotlib.pyplot as plt
 from concurrent.futures import ThreadPoolExecutor
 
-# --- OPTIMIZED FUNDAMENTAL FETCHING ---
+# --- CORE UTILS ---
 def fetch_ticker_info(t):
-    """Worker function to fetch info in parallel"""
-    try:
-        ticker = yf.Ticker(t)
-        info = ticker.info
-        return t, info
-    except:
-        return t, {}
+    try: return t, yf.Ticker(t).info
+    except: return t, {}
+
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
 def get_russell_1000():
     url = "https://en.wikipedia.org/wiki/Russell_1000_Index"
@@ -35,102 +37,106 @@ def run_scanner():
         gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
         sh = gc.open("Stock Scanner")
 
-        # 2. BULK HISTORICAL DATA
+        # 2. DATA DOWNLOAD
         tkrs = get_russell_1000()
-        print(f"Downloading history for {len(tkrs)} stocks...")
-        data = yf.download(tkrs + ["SPY"], period="2y", group_by='ticker', progress=False)
-        spy_close = data['SPY']['Close']
+        data = yf.download(tkrs, period="2y", group_by='ticker', progress=False)
 
-        # 3. PARALLEL INFO FETCH (The Speed Booster)
-        print("Fetching fundamentals in parallel...")
-        info_map = {}
         with ThreadPoolExecutor(max_workers=10) as executor:
-            results_info = list(executor.map(fetch_ticker_info, tkrs))
-            for t, info in results_info:
-                info_map[t] = info
+            info_results = list(executor.map(fetch_ticker_info, tkrs))
+            info_map = {t: info for t, info in info_results}
 
         results = []
         for t in tkrs:
             try:
                 df = data[t].dropna()
-                if len(df) < 150: continue
+                if len(df) < 200: continue
                 
-                # --- SQUEEZE & MOMENTUM LOGIC ---
-                sma = df['Close'].rolling(20).mean()
-                std = df['Close'].rolling(20).std()
-                upper_bb, lower_bb = sma + (std * 2), sma - (std * 2)
-                atr = (df['High']-df['Low']).rolling(14).mean()
+                close = df['Close'].iloc[-1]
+                sma200 = df['Close'].rolling(200).mean().iloc[-1]
+                atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
+                df['RSI'] = calculate_rsi(df['Close'])
+                current_rsi = df['RSI'].iloc[-1]
+
+                # --- APEX DUAL-SCAN LOGIC ---
                 
-                is_squeeze = 1 if (lower_bb.iloc[-1] > (sma.iloc[-1] - (atr.iloc[-1]*1.5))) and (upper_bb.iloc[-1] < (sma.iloc[-1] + (atr.iloc[-1]*1.5))) else 0
-                vol_ratio = df['Volume'].iloc[-1] / df['Volume'].rolling(20).mean().iloc[-1]
-                rs_val = ((df['Close'].iloc[-1]/spy_close.reindex(df.index).iloc[-1])/(df['Close'].iloc[-150]/spy_close.reindex(df.index).iloc[-150])-1)*100
-                
-                power_score = (is_squeeze * 50) + (min(rs_val, 30)) + (min(vol_ratio * 5, 20))
-                
-                info = info_map.get(t, {})
-                
-                # EXACT COLUMN ORDER FROM ORIGINAL SCRIPT
-                results.append({
-                    'Stock': t, 
-                    'Squeeze': "ACTIVE" if is_squeeze else "OFF", 
-                    'Power_Score': round(power_score, 2),
-                    'Vol_Surge': f"{vol_ratio:.2f}x", 
-                    'Buy_At': round(df['Close'].iloc[-1], 2),
-                    'Stop_Loss': round(df['Close'].iloc[-1] * 0.93, 2), 
-                    'Target_1': round(info.get('targetHighPrice', df['Close'].iloc[-1] * 1.25), 2),
-                    'Gross_M': f"{info.get('grossMargins', 0)*100:.0f}%", 
-                    'EBIT_M': f"{info.get('ebitdaMargins', 0)*100:.0f}%",
-                    'Mkt_Cap': f"{info.get('marketCap', 0)/1e9:.1f}B", 
-                    'Price': round(df['Close'].iloc[-1], 2),
-                    'YTD': round(((df['Close'].iloc[-1]/df['Close'].iloc[0])-1)*100, 1)
-                })
+                # OPTION A: LONG SETUP (Oversold in Uptrend)
+                if close > sma200 and current_rsi < 42:
+                    two_day_high = df['High'].iloc[-2:].max()
+                    buy_trigger = round(two_day_high * 1.005, 2)
+                    stop_loss = round(buy_trigger - (atr * 2.5), 2)
+                    if (buy_trigger - stop_loss) / buy_trigger <= 0.12:
+                        results.append({
+                            'Stock': t, 'Squeeze': f"LONG (RSI:{int(current_rsi)})",
+                            'Power_Score': round(42 - current_rsi, 2),
+                            'Buy_At': buy_trigger, 'Stop_Loss': stop_loss, 'Target_1': round(buy_trigger * 1.25, 2),
+                            'Trade_Type': 'LONG', 'Price': round(close, 2), 'df': df
+                        })
+
+                # OPTION B: SHORT SETUP (Overbought in Downtrend)
+                elif close < sma200 and current_rsi > 58:
+                    two_day_low = df['Low'].iloc[-2:].min()
+                    sell_trigger = round(two_day_low * 0.995, 2)
+                    stop_loss = round(sell_trigger + (atr * 2.5), 2)
+                    if (stop_loss - sell_trigger) / sell_trigger <= 0.12:
+                        results.append({
+                            'Stock': t, 'Squeeze': f"SHORT (RSI:{int(current_rsi)})",
+                            'Power_Score': round(current_rsi - 58, 2),
+                            'Buy_At': sell_trigger, 'Stop_Loss': stop_loss, 'Target_1': round(sell_trigger * 0.85, 2),
+                            'Trade_Type': 'SHORT', 'Price': round(close, 2), 'df': df
+                        })
             except: continue
 
-        df_full = pd.DataFrame(results).sort_values('Power_Score', ascending=False)
+        # Sort and take Top 10
+        final_df = pd.DataFrame(results).sort_values('Power_Score', ascending=False)
         
-        # 3. UPDATE SHEETS (MATCHING ORIGINAL FORMAT)
+        # Build final output for Sheets
+        sheet_data = []
+        for _, row in final_df.iterrows():
+            info = info_map.get(row.Stock, {})
+            df_t = row.df
+            sheet_data.append({
+                'Stock': row.Stock, 'Squeeze': row.Squeeze, 'Power_Score': row.Power_Score,
+                'Vol_Surge': f"{df_t['Volume'].iloc[-1]/df_t['Volume'].rolling(20).mean().iloc[-1]:.2f}x",
+                'Buy_At': row.Buy_At, 'Stop_Loss': row.Stop_Loss, 'Target_1': row.Target_1,
+                'Gross_M': f"{info.get('grossMargins', 0)*100:.0f}%", 'EBIT_M': f"{info.get('ebitdaMargins', 0)*100:.0f}%",
+                'Mkt_Cap': f"{info.get('marketCap', 0)/1e9:.1f}B", 'Price': row.Price,
+                'YTD': round(((row.Price/df_t['Close'].iloc[0])-1)*100, 1)
+            })
+
+        df_out = pd.DataFrame(sheet_data)
+
+        # 3. UPDATE SHEETS
         for sn in ["Summary", "Core Screener"]:
-            ws = sh.worksheet(sn)
-            ws.clear()
-            up_df = df_full.head(10) if sn == "Summary" else df_full
+            ws = sh.worksheet(sn); ws.clear()
+            up_df = df_out.head(10) if sn == "Summary" else df_out
             ws.update([up_df.columns.tolist()] + up_df.astype(str).values.tolist())
 
-        # 4. DISPATCH TELEGRAM CHARTS
-        for _, row in df_full.head(5).iterrows():
-            ticker_symbol = row.Stock
-            hist = data[ticker_symbol].tail(120)
+        # 4. TELEGRAM ALERTS (TOP 10 MIXED)
+        for _, row in df_out.head(10).iterrows():
+            ticker = row.Stock
+            hist = data[ticker].tail(100)
+            apds = [mpf.make_addplot(hist['Close'].rolling(200).mean(), color='blue', width=1.5)]
             
-            # Indicators for Chart
-            sma20 = hist['Close'].rolling(20).mean()
-            std20 = hist['Close'].rolling(20).std()
-            upper_bb, lower_bb = sma20 + (std20 * 2), sma20 - (std20 * 2)
-            sma200 = data[ticker_symbol]['Close'].rolling(200).mean().tail(120)
-
-            apds = [
-                mpf.make_addplot(upper_bb, color='gray', width=0.8, linestyle='dashed'),
-                mpf.make_addplot(lower_bb, color='gray', width=0.8, linestyle='dashed'),
-                mpf.make_addplot(sma200, color='blue', width=1.5)
-            ]
-
             buf = io.BytesIO()
-            mpf.plot(hist, type='candle', addplot=apds, style='charles', 
-                     volume=True, savefig=buf, tight_layout=True)
+            mpf.plot(hist, type='candle', addplot=apds, style='charles', savefig=buf)
             buf.seek(0)
 
+            emoji = "🎯 BUY" if "LONG" in row.Squeeze else "💀 SELL"
             caption = (
-                f"<b>{ticker_symbol}</b>\n"
-                f"💰 Price: ${row.Price}\n"
-                f"🎯 Buy: ${row.Buy_At} | Target: ${row.Target_1}\n"
-                f"🛑 Stop: ${row.Stop_Loss}\n"
-                f"📊 Power Score: {row.Power_Score}"
+                f"<b>{emoji}: {ticker}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"💰 <b>Last Price:</b> ${row.Price}\n"
+                f"⚔️ <b>{('Entry' if 'LONG' in emoji else 'Short At')}:</b> ${row.Buy_At}\n"
+                f"🛡️ <b>Stop Loss:</b> ${row.Stop_Loss}\n"
+                f"🏁 <b>Exit Target:</b> ${row.Target_1}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📊 <i>Apex Score: {row.Power_Score} | {row.Squeeze}</i>"
             )
-
             requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", 
-                          files={'photo': (f'{ticker_symbol}.png', buf)}, 
+                          files={'photo': (f'{ticker}.png', buf)}, 
                           data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
             plt.close('all')
 
-        print("Process Completed Successfully.")
     except Exception as e: print(f"FATAL ERROR: {e}")
 
 if __name__ == "__main__":
