@@ -85,14 +85,11 @@ def run_scanner():
             info_map = {t: info for t, info in info_results}
 
         results = []
-        # Multi-index safe check
         available_tickers = data.columns.levels[0] if isinstance(data.columns, pd.MultiIndex) else data.columns
 
         for t in tkrs:
             try:
                 if t not in available_tickers: continue
-                
-                # DATA GUARD 1: Drop NaNs and ensure sufficient history
                 df = data[t].dropna(subset=['Close', 'High', 'Low'])
                 if df.empty or len(df) < 212: continue
                 
@@ -104,7 +101,6 @@ def run_scanner():
                 rsi_window = df['RSI'].tail(12).dropna()
                 if rsi_window.empty: continue 
 
-                # DATA GUARD 2: Explicitly check the trigger slice for empty arrays
                 recent_slice = df.iloc[-2:]
                 if recent_slice['High'].isnull().all() or recent_slice['Low'].isnull().all():
                     continue
@@ -119,49 +115,48 @@ def run_scanner():
                 if close > sma200 and rsi_window.min() < 42:
                     days_since = len(rsi_window) - rsi_window.argmin() - 1
                     multiplier = get_timing_multiplier(days_since)
-                    
                     buy_trigger = round(recent_slice['High'].max() * 1.005, 2)
                     stop_loss = round(buy_trigger - (atr * 2.5), 2)
-                    
                     if (buy_trigger - stop_loss) / buy_trigger <= 0.12:
                         results.append({
                             'Stock': t, 'Type': 'LONG', 'RSI': int(df['RSI'].iloc[-1]),
                             'Power_Score': round(((42 - rsi_window.min()) * 5) * multiplier, 2),
                             'Buy_At': buy_trigger, 'Sell_At': '', 'Days_Since': days_since,
                             'Stop_Loss': stop_loss, 'Target_1': round(buy_trigger * 1.25, 2),
-                            'Price': round(close, 2), 'df': df
+                            'Price': round(close, 2)
                         })
 
                 # SHORT LOGIC
                 elif close < sma200 and rsi_window.max() > 58:
                     days_since = len(rsi_window) - rsi_window.argmax() - 1
                     multiplier = get_timing_multiplier(days_since)
-                    
                     sell_trigger = round(recent_slice['Low'].min() * 0.995, 2)
                     stop_loss = round(sell_trigger + (atr * 2.5), 2)
-                    
                     if (stop_loss - sell_trigger) / sell_trigger <= 0.12:
                         results.append({
                             'Stock': t, 'Type': 'SHORT', 'RSI': int(df['RSI'].iloc[-1]),
                             'Power_Score': round(((rsi_window.max() - 58) * 5) * multiplier, 2),
                             'Buy_At': '', 'Sell_At': sell_trigger, 'Days_Since': days_since,
                             'Stop_Loss': stop_loss, 'Target_1': round(sell_trigger * 0.85, 2),
-                            'Price': round(close, 2), 'df': df
+                            'Price': round(close, 2)
                         })
             except Exception: continue
 
         # 4. DATA PROCESSING
         final_df = pd.DataFrame(results).sort_values('Power_Score', ascending=False)
         if final_df.empty:
-            print("⚠️ No valid setups found after filtering bad data.")
+            print("⚠️ No valid setups found.")
             return
 
         full_data = []
         for _, row in final_df.head(50).iterrows():
-            info = info_map.get(row.Stock, {})
-            df_t = row.df
+            ticker = row.Stock
+            info = info_map.get(ticker, {})
+            # Pull history for YTD calculation
+            df_t = data[ticker].dropna()
+            
             full_data.append({
-                'Stock': row.Stock, 'Squeeze': f"{row.Type} (RSI:{row.RSI})", 'Power_Score': row.Power_Score,
+                'Stock': ticker, 'Squeeze': f"{row.Type} (RSI:{row.RSI})", 'Power_Score': row.Power_Score,
                 'Vol_Surge': f"{df_t['Volume'].iloc[-1]/df_t['Volume'].rolling(20).mean().iloc[-1]:.2f}x",
                 'Buy_At': row.Buy_At, 'Sell_At': row.Sell_At, 'RSI_Days': row.Days_Since,
                 'Stop_Loss': row.Stop_Loss, 'Target_1': row.Target_1,
@@ -174,7 +169,7 @@ def run_scanner():
         core_df = pd.DataFrame(full_data)
         summary_df = core_df.head(5).drop(columns=['Gross_M', 'EBIT_M'])
 
-        # Update Sheets
+        # 5. SHEET UPDATES
         for name, d_frame in [("Summary", summary_df), ("Core Screener", core_df)]:
             ws = sh.worksheet(name)
             ws.clear()
@@ -182,8 +177,10 @@ def run_scanner():
 
         # 6. TELEGRAM ALERTS
         for _, row in core_df.head(5).iterrows():
-            ticker, df_t = row.Stock, row.df
-            hist = df_t.tail(100)
+            ticker = row.Stock
+            # FIXED: Pull history from 'data' variable instead of row.df
+            hist = data[ticker].dropna().tail(100)
+            
             apds = [mpf.make_addplot(hist['Close'].rolling(200).mean(), color='blue', width=1.5)]
             buf = io.BytesIO()
             mpf.plot(hist, type='candle', addplot=apds, style='charles', savefig=buf)
