@@ -11,8 +11,13 @@ from urllib.request import Request, urlopen
 from PIL import Image
 
 # --- THE PATH COLOR PALETTE ---
-BG_WHITE = '#ffffff'; TEAL = '#42cbf5'; ORANGE_TAG = '#ffbf7f'
-BLACK = '#000000'; RED = '#ff4b4b'; GREEN = '#009933'; LIGHT_GRAY = '#eeeeee'
+BG_WHITE = '#ffffff'
+TEAL = '#42cbf5'
+ORANGE_TAG_LIGHT = '#ffbf7f'  # Restored lighter shade
+BLACK = '#000000'
+RED = '#ff4b4b'
+GREEN = '#009933'
+LIGHT_GRAY = '#eeeeee'
 TAG_GROMMET = '#d4af37' 
 
 def safe_float(val, default=0.0):
@@ -30,7 +35,8 @@ def draw_ring(ax, x, y, pct, label, color, size=0.14):
 def create_master_infographic(ticker, row, info):
     try:
         fig = plt.figure(figsize=(12, 16), facecolor=BG_WHITE, dpi=300)
-        ax = fig.add_axes([0, 0, 1, 1], frameon=False); ax.set_xlim(0, 10); ax.set_ylim(0, 14)
+        ax = fig.add_axes([0, 0, 1, 1], frameon=False)
+        ax.set_xlim(0, 10); ax.set_ylim(0, 14)
         ax.set_xticks([]); ax.set_yticks([])
 
         # --- 1. HEADER (RED TICKER + LOGO) ---
@@ -42,7 +48,6 @@ def create_master_infographic(ticker, row, info):
         except Exception:
             ax.text(0.6, 12.8, ticker, fontsize=110, fontweight='black', color=RED)
         
-        # Right metrics (Right-Aligned)
         mcap = safe_float(info.get('marketCap')) / 1e9
         ax.text(9.4, 13.3, f"${mcap:.1f}B Market Cap", ha='right', fontsize=26, fontweight='black')
         ax.text(9.4, 12.8, f"{row['5Y_Perf']:.0f}% 5Y", ha='right', fontsize=26, fontweight='black', color=GREEN if row['5Y_Perf'] > 0 else RED)
@@ -63,18 +68,19 @@ def create_master_infographic(ticker, row, info):
             ax.text(0.75, y_pos, f"${i*500}M", ha='right', fontsize=9, color='#999999', fontweight='bold')
 
         for i, yr in enumerate(years):
-            lbl = f"{yr}*" if yr >= 2027 else str(yr)
+            lbl = f"{yr}*" if yr >= 2027 else str(yr) # Note
             ax.text(x_pts[i], chart_bottom - 0.25, lbl, ha='center', fontsize=10, fontweight='bold')
             ax.add_patch(Rectangle((x_pts[i]-0.15, chart_bottom), 0.1, 1.2, color=BLACK)) 
             ax.add_patch(Rectangle((x_pts[i]-0.05, chart_bottom), 0.1, 0.4, color=TEAL)) 
             ax.add_patch(Rectangle((x_pts[i]+0.05, chart_bottom), 0.1, 0.3, color=RED)) 
 
-        # --- 3. MARGINS ---
+        # --- 3. MARGINS (Vertical Spacing Squeezed) ---
         ax.text(8.3, 11.2, "$ Margins", fontsize=24, fontweight='black', color=TEAL)
-        draw_ring(ax, 8.2, 10.4, 83, "83% Gross", TEAL)
-        draw_ring(ax, 8.2, 9.7, 4, "4% EBIT", RED)
-        draw_ring(ax, 8.2, 9.0, 18, "18% Net", TEAL)
-        draw_ring(ax, 8.2, 8.3, 22, "22% FCF", RED)
+        m_start_y = 10.5
+        draw_ring(ax, 8.2, m_start_y - (0 * 0.55), 83, "83% Gross", TEAL)
+        draw_ring(ax, 8.2, m_start_y - (1 * 0.55), 4, "4% EBIT", RED)
+        draw_ring(ax, 8.2, m_start_y - (2 * 0.55), 18, "18% Net", TEAL)
+        draw_ring(ax, 8.2, m_start_y - (3 * 0.55), 22, "22% FCF", RED)
 
         # --- 4. KEY RATIOS ---
         ax.text(0.6, 8.1, "🔍 Key ratios", fontsize=28, fontweight='black') 
@@ -106,10 +112,10 @@ def create_master_infographic(ticker, row, info):
         ax.text(4.2, 2.0, "• Agentic AI", fontsize=18, fontweight='bold')
         ax.text(4.2, 1.5, "• The Platform", fontsize=18, fontweight='bold')
 
-        # --- 8. PRICE TAG (With Lanyard & Grommet) ---
+        # --- 8. PRICE TAG (Light Orange + Correct String/Grommet) ---
         ax.plot([8.3, 8.4], [8.0, 7.5], color='#AAAAAA', lw=1.5, zorder=1) 
         ax.plot([8.4, 8.5], [8.0, 7.5], color='#AAAAAA', lw=1.5, zorder=1)
-        ax.add_patch(FancyBboxPatch((7.8, 0.4), 2.0, 7.1, boxstyle="round,pad=0.02,rounding_size=0.3", facecolor=ORANGE_TAG, zorder=2))
+        ax.add_patch(FancyBboxPatch((7.8, 0.4), 2.0, 7.1, boxstyle="round,pad=0.02,rounding_size=0.3", facecolor=ORANGE_TAG_LIGHT, zorder=2))
         ax.add_patch(Circle((8.4, 7.1), 0.15, facecolor='none', edgecolor=TAG_GROMMET, lw=3, zorder=3))
         ax.add_patch(Circle((8.4, 7.1), 0.05, facecolor=BG_WHITE, zorder=3)) 
         ax.text(8.8, 5.4, f"${row.Price:.0f}", ha='center', fontsize=70, fontweight='black')
