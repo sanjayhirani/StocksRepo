@@ -13,8 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 def fetch_ticker_info(t):
     try:
         ticker = yf.Ticker(t)
-        info = ticker.info
-        return t, info
+        return t, ticker.info
     except: return t, {}
 
 def calculate_rsi(series, period=14):
@@ -22,7 +21,7 @@ def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / (loss + 1e-9) # Prevent division by zero
+    rs = gain / (loss + 1e-9)
     return 100 - (100 / (1 + rs))
 
 def get_russell_1000():
@@ -101,43 +100,45 @@ def run_scanner():
                             'Stop_Loss': stop_loss, 'Target_1': round(sell_trigger * 0.85, 2),
                             'Price': round(close, 2), 'df': df
                         })
-            except Exception: continue
+            except: continue
 
         # 4. DATA PROCESSING
         final_df = pd.DataFrame(results).sort_values('Power_Score', ascending=False)
         if final_df.empty: return
 
-        sheet_rows = []
-        for _, row in final_df.iterrows():
+        # 5. SHEET UPDATES
+        # Create Full Data for Core Screener (Top 50)
+        full_data = []
+        for _, row in final_df.head(50).iterrows():
             info = info_map.get(row.Stock, {})
             df_t = row.df
-            
-            # Improved Fundamental Retrieval
-            gross_m = info.get('grossMargins') or info.get('margin') or 0
-            ebit_m = info.get('ebitdaMargins') or info.get('operatingMargins') or 0
-            mkt_cap = info.get('marketCap') or info.get('enterpriseValue') or 0
-
-            sheet_rows.append({
+            full_data.append({
                 'Stock': row.Stock, 'Squeeze': f"{row.Type} (RSI:{row.RSI})", 'Power_Score': row.Power_Score,
                 'Vol_Surge': f"{df_t['Volume'].iloc[-1]/df_t['Volume'].rolling(20).mean().iloc[-1]:.2f}x",
                 'Buy_At': row.Buy_At, 'Sell_At': row.Sell_At, 'RSI_Days': row.Days_Since,
                 'Stop_Loss': row.Stop_Loss, 'Target_1': row.Target_1,
-                'Gross_M': f"{gross_m*100:.0f}%", 'EBIT_M': f"{ebit_m*100:.0f}%",
-                'Mkt_Cap': f"{mkt_cap/1e9:.1f}B", 'Price': row.Price,
-                'YTD': round(((row.Price/df_t['Close'].iloc[0])-1)*100, 1)
+                'Gross_M': f"{(info.get('grossMargins', 0) or 0)*100:.0f}%", 
+                'EBIT_M': f"{(info.get('ebitdaMargins', 0) or 0)*100:.0f}%",
+                'Mkt_Cap': f"{(info.get('marketCap', 0) or 0)/1e9:.1f}B", 
+                'Price': row.Price, 'YTD': round(((row.Price/df_t['Close'].iloc[0])-1)*100, 1)
             })
+        
+        core_df = pd.DataFrame(full_data)
+        
+        # Create Cleaned Summary Data (Top 5) - Excluding Margins
+        summary_df = core_df.head(5).drop(columns=['Gross_M', 'EBIT_M'])
 
-        output_df = pd.DataFrame(sheet_rows)
+        # Update Sheets
+        ws_sum = sh.worksheet("Summary")
+        ws_sum.clear()
+        ws_sum.update([summary_df.columns.tolist()] + summary_df.astype(str).values.tolist())
 
-        # 5. SHEET UPDATES (Top 5 & Top 50)
-        for sn in ["Summary", "Core Screener"]:
-            ws = sh.worksheet(sn)
-            ws.clear()
-            up_df = output_df.head(5) if sn == "Summary" else output_df.head(50)
-            ws.update([up_df.columns.tolist()] + up_df.astype(str).values.tolist())
+        ws_core = sh.worksheet("Core Screener")
+        ws_core.clear()
+        ws_core.update([core_df.columns.tolist()] + core_df.astype(str).values.tolist())
 
         # 6. TELEGRAM ALERTS (Top 5)
-        for _, row in output_df.head(5).iterrows():
+        for _, row in core_df.head(5).iterrows():
             ticker = row.Stock
             hist = data[ticker].tail(100)
             apds = [mpf.make_addplot(hist['Close'].rolling(200).mean(), color='blue', width=1.5)]
