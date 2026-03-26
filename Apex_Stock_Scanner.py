@@ -11,7 +11,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 # --- CORE UTILS ---
 def fetch_ticker_info(t):
-    try: return t, yf.Ticker(t).info
+    try:
+        ticker = yf.Ticker(t)
+        info = ticker.info
+        return t, info
     except: return t, {}
 
 def calculate_rsi(series, period=14):
@@ -19,7 +22,7 @@ def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
+    rs = gain / (loss + 1e-9) # Prevent division by zero
     return 100 - (100 / (1 + rs))
 
 def get_russell_1000():
@@ -42,7 +45,7 @@ def run_scanner():
 
         # 2. DATA ACQUISITION
         tkrs = get_russell_1000()
-        data = yf.download(tkrs + ["SPY"], period="2y", group_by='ticker', progress=False)
+        data = yf.download(tkrs, period="2y", group_by='ticker', progress=False)
 
         with ThreadPoolExecutor(max_workers=10) as executor:
             info_results = list(executor.map(fetch_ticker_info, tkrs))
@@ -108,13 +111,20 @@ def run_scanner():
         for _, row in final_df.iterrows():
             info = info_map.get(row.Stock, {})
             df_t = row.df
+            
+            # Improved Fundamental Retrieval
+            gross_m = info.get('grossMargins') or info.get('margin') or 0
+            ebit_m = info.get('ebitdaMargins') or info.get('operatingMargins') or 0
+            mkt_cap = info.get('marketCap') or info.get('enterpriseValue') or 0
+
             sheet_rows.append({
                 'Stock': row.Stock, 'Squeeze': f"{row.Type} (RSI:{row.RSI})", 'Power_Score': row.Power_Score,
                 'Vol_Surge': f"{df_t['Volume'].iloc[-1]/df_t['Volume'].rolling(20).mean().iloc[-1]:.2f}x",
                 'Buy_At': row.Buy_At, 'Sell_At': row.Sell_At, 'RSI_Days': row.Days_Since,
                 'Stop_Loss': row.Stop_Loss, 'Target_1': row.Target_1,
-                'Gross_M': f"{info.get('grossMargins', 0)*100:.0f}%", 'Mkt_Cap': f"{info.get('marketCap', 0)/1e9:.1f}B", 
-                'Price': row.Price, 'YTD': round(((row.Price/df_t['Close'].iloc[0])-1)*100, 1)
+                'Gross_M': f"{gross_m*100:.0f}%", 'EBIT_M': f"{ebit_m*100:.0f}%",
+                'Mkt_Cap': f"{mkt_cap/1e9:.1f}B", 'Price': row.Price,
+                'YTD': round(((row.Price/df_t['Close'].iloc[0])-1)*100, 1)
             })
 
         output_df = pd.DataFrame(sheet_rows)
@@ -124,7 +134,6 @@ def run_scanner():
             ws = sh.worksheet(sn)
             ws.clear()
             up_df = output_df.head(5) if sn == "Summary" else output_df.head(50)
-            # Update data with Headings in Row 1
             ws.update([up_df.columns.tolist()] + up_df.astype(str).values.tolist())
 
         # 6. TELEGRAM ALERTS (Top 5)
