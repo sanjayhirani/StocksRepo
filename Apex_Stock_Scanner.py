@@ -17,27 +17,38 @@ CACHE_FILE = os.path.join(CACHE_DIR, "russell_1000_2y.pkl")
 def get_cached_data(tkrs):
     if not os.path.exists(CACHE_DIR):
         os.makedirs(CACHE_DIR)
+    
     if os.path.exists(CACHE_FILE):
         try:
             existing_data = pd.read_pickle(CACHE_FILE)
+            
+            # --- OPTION A: AUTO-PURGE GHOST TICKERS ---
+            # Remove any columns that are entirely NaN/Empty
+            existing_data = existing_data.dropna(axis=1, how='all')
+            
             last_date = existing_data.index.max()
             if last_date.date() >= datetime.now().date():
-                print("✅ Cache is up to date.")
+                print("✅ Cache is up to date and sanitized.")
                 return existing_data
+            
             print(f"📜 Updating cache from {last_date.date()}...")
             new_data = yf.download(tkrs, start=last_date, group_by='ticker', progress=True)
+            
             if not new_data.empty:
                 combined = pd.concat([existing_data, new_data])
                 combined = combined[~combined.index.duplicated(keep='last')].sort_index()
+                # Keep 2-year window
                 start_cutoff = combined.index.max() - pd.DateOffset(years=2)
                 final_data = combined[combined.index >= start_cutoff]
                 final_data.to_pickle(CACHE_FILE)
                 return final_data
         except Exception as e:
-            print(f"⚠️ Cache Load Error: {e}. Starting fresh...")
-    
-    print("🚀 Initializing full 2-year download...")
+            print(f"⚠️ Cache Reset Required: {e}")
+
+    print("🚀 Performing full 2-year initial download...")
     final_data = yf.download(tkrs, period="2y", group_by='ticker', progress=True)
+    # Sanitize before first save
+    final_data = final_data.dropna(axis=1, how='all')
     final_data.to_pickle(CACHE_FILE)
     return final_data
 
@@ -77,7 +88,7 @@ def run_scanner():
         data = get_cached_data(tkrs)
 
         if data.empty:
-            print("❌ Critical: Dataframe is empty.")
+            print("❌ Critical Error: Market data is empty.")
             return
 
         with ThreadPoolExecutor(max_workers=10) as executor:
@@ -90,19 +101,22 @@ def run_scanner():
         for t in tkrs:
             try:
                 if t not in available_tickers: continue
-                df = data[t].dropna(subset=['Close', 'High', 'Low'])
-                if df.empty or len(df) < 212: continue
                 
-                close = df['Close'].iloc[-1]
-                sma200 = df['Close'].rolling(200).mean().iloc[-1]
-                atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
+                # Check if the specific ticker has price data
+                ticker_df = data[t].dropna(subset=['Close', 'High', 'Low'])
+                if len(ticker_df) < 212: continue
                 
-                df['RSI'] = calculate_rsi(df['Close'])
-                rsi_window = df['RSI'].tail(12).dropna()
+                close = ticker_df['Close'].iloc[-1]
+                sma200 = ticker_df['Close'].rolling(200).mean().iloc[-1]
+                atr = (ticker_df['High'] - ticker_df['Low']).rolling(14).mean().iloc[-1]
+                
+                ticker_df['RSI'] = calculate_rsi(ticker_df['Close'])
+                rsi_window = ticker_df['RSI'].tail(12).dropna()
                 if rsi_window.empty: continue 
 
-                recent_slice = df.iloc[-2:]
-                if recent_slice['High'].isnull().all() or recent_slice['Low'].isnull().all():
+                # FINAL TRIGGER GUARD
+                recent_slice = ticker_df.iloc[-2:]
+                if len(recent_slice) < 2 or recent_slice['High'].isnull().any():
                     continue
 
                 def get_timing_multiplier(days):
@@ -119,7 +133,7 @@ def run_scanner():
                     stop_loss = round(buy_trigger - (atr * 2.5), 2)
                     if (buy_trigger - stop_loss) / buy_trigger <= 0.12:
                         results.append({
-                            'Stock': t, 'Type': 'LONG', 'RSI': int(df['RSI'].iloc[-1]),
+                            'Stock': t, 'Type': 'LONG', 'RSI': int(ticker_df['RSI'].iloc[-1]),
                             'Power_Score': round(((42 - rsi_window.min()) * 5) * multiplier, 2),
                             'Buy_At': buy_trigger, 'Sell_At': '', 'Days_Since': days_since,
                             'Stop_Loss': stop_loss, 'Target_1': round(buy_trigger * 1.25, 2),
@@ -134,7 +148,7 @@ def run_scanner():
                     stop_loss = round(sell_trigger + (atr * 2.5), 2)
                     if (stop_loss - sell_trigger) / sell_trigger <= 0.12:
                         results.append({
-                            'Stock': t, 'Type': 'SHORT', 'RSI': int(df['RSI'].iloc[-1]),
+                            'Stock': t, 'Type': 'SHORT', 'RSI': int(ticker_df['RSI'].iloc[-1]),
                             'Power_Score': round(((rsi_window.max() - 58) * 5) * multiplier, 2),
                             'Buy_At': '', 'Sell_At': sell_trigger, 'Days_Since': days_since,
                             'Stop_Loss': stop_loss, 'Target_1': round(sell_trigger * 0.85, 2),
@@ -142,66 +156,53 @@ def run_scanner():
                         })
             except Exception: continue
 
-        # 4. DATA PROCESSING
         final_df = pd.DataFrame(results).sort_values('Power_Score', ascending=False)
         if final_df.empty:
-            print("⚠️ No valid setups found.")
+            print("⚠️ No setups found today.")
             return
 
         full_data = []
         for _, row in final_df.head(50).iterrows():
             ticker = row.Stock
             info = info_map.get(ticker, {})
-            # Pull history for YTD calculation
-            df_t = data[ticker].dropna()
-            
+            hist = data[ticker].dropna()
             full_data.append({
                 'Stock': ticker, 'Squeeze': f"{row.Type} (RSI:{row.RSI})", 'Power_Score': row.Power_Score,
-                'Vol_Surge': f"{df_t['Volume'].iloc[-1]/df_t['Volume'].rolling(20).mean().iloc[-1]:.2f}x",
+                'Vol_Surge': f"{hist['Volume'].iloc[-1]/hist['Volume'].rolling(20).mean().iloc[-1]:.2f}x",
                 'Buy_At': row.Buy_At, 'Sell_At': row.Sell_At, 'RSI_Days': row.Days_Since,
                 'Stop_Loss': row.Stop_Loss, 'Target_1': row.Target_1,
                 'Gross_M': f"{(info.get('grossMargins', 0) or 0)*100:.0f}%", 
                 'EBIT_M': f"{(info.get('ebitdaMargins', 0) or 0)*100:.0f}%",
                 'Mkt_Cap': f"{(info.get('marketCap', 0) or 0)/1e9:.1f}B", 
-                'Price': row.Price, 'YTD': round(((row.Price/df_t['Close'].iloc[0])-1)*100, 1)
+                'Price': row.Price, 'YTD': round(((row.Price/hist['Close'].iloc[0])-1)*100, 1)
             })
         
         core_df = pd.DataFrame(full_data)
         summary_df = core_df.head(5).drop(columns=['Gross_M', 'EBIT_M'])
 
-        # 5. SHEET UPDATES
         for name, d_frame in [("Summary", summary_df), ("Core Screener", core_df)]:
             ws = sh.worksheet(name)
             ws.clear()
             ws.update([d_frame.columns.tolist()] + d_frame.astype(str).values.tolist())
 
-        # 6. TELEGRAM ALERTS
+        # TELEGRAM
         for _, row in core_df.head(5).iterrows():
             ticker = row.Stock
-            # FIXED: Pull history from 'data' variable instead of row.df
             hist = data[ticker].dropna().tail(100)
-            
             apds = [mpf.make_addplot(hist['Close'].rolling(200).mean(), color='blue', width=1.5)]
             buf = io.BytesIO()
             mpf.plot(hist, type='candle', addplot=apds, style='charles', savefig=buf)
             buf.seek(0)
-            
             is_long = "LONG" in row.Squeeze
             entry_price = row.Buy_At if is_long else row.Sell_At
-            emoji = "🎯 BUY" if is_long else "💀 SELL"
-            prime_tag = "\n🔥 <b>PRIME SNIPER SETUP</b>" if row.RSI_Days == 3 else ""
-
-            caption = (
-                f"<b>{emoji}: {ticker}</b>{prime_tag}\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"💰 <b>Last:</b> ${row.Price} | ⏳ <b>Age:</b> {row.RSI_Days}d\n"
-                f"⚔️ <b>Trigger:</b> ${entry_price}\n"
-                f"🛡️ <b>Stop:</b> ${row.Stop_Loss} | 🏁 <b>Target:</b> ${row.Target_1}\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"📊 <i>Apex Score: {row.Power_Score} | {row.Squeeze}</i>"
-            )
+            emoji, prime_tag = ("🎯 BUY", "\n🔥 <b>PRIME SNIPER SETUP</b>") if row.RSI_Days == 3 else (("🎯 BUY" if is_long else "💀 SELL"), "")
+            caption = (f"<b>{emoji}: {ticker}</b>{prime_tag}\n━━━━━━━━━━━━━━━━━━━━\n💰 <b>Last:</b> ${row.Price} | ⏳ <b>Age:</b> {row.RSI_Days}d\n"
+                       f"⚔️ <b>Trigger:</b> ${entry_price}\n🛡️ <b>Stop:</b> ${row.Stop_Loss} | 🏁 <b>Target:</b> ${row.Target_1}\n"
+                       f"━━━━━━━━━━━━━━━━━━━━\n📊 <i>Apex Score: {row.Power_Score} | {row.Squeeze}</i>")
             requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", files={'photo': (f'{ticker}.png', buf)}, data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
             plt.close('all')
+        
+        print("✅ Scan Complete. Sheets updated and Alerts sent.")
 
     except Exception as e: print(f"FATAL ERROR: {e}")
 
