@@ -17,24 +17,15 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install System Dependencies (Cairo & Fonts)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libcairo2-dev pkg-config python3-dev
-          sudo apt-get install -y fonts-lato fonts-open-sans
-          sudo fc-cache -f -v
-
       - name: Install Python Dependencies
         run: |
           pip install --upgrade pip
-          # Added cairosvg and lxml explicitly to support the V95 script
-          pip install Pillow yfinance pandas numpy gspread oauth2client \
-                      google-generativeai requests lxml svglib reportlab cairosvg
+          pip install yfinance pandas numpy gspread oauth2client \
+                      requests lxml mplfinance matplotlib
 
       - name: Run Apex Scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDS }}
         run: python Apex_Stock_Scanner.py
