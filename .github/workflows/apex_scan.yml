@@ -17,19 +17,21 @@ jobs:
         with:
           python-version: '3.12'
 
+      # Move Cache here: Restore old data BEFORE running the script
+      - name: Cache Stock Data
+        uses: actions/cache@v3
+        with:
+          path: data_cache
+          # Change: Using run_number or a timestamp ensures a new cache is saved every time
+          key: ${{ runner.os }}-stock-data-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-stock-data-
+
       - name: Install Python Dependencies
         run: |
           pip install --upgrade pip
           pip install yfinance pandas numpy gspread oauth2client \
                       requests lxml mplfinance matplotlib
-
-      - name: Cache Stock Data
-        uses: actions/cache@v3
-        with:
-          path: data_cache
-          key: ${{ runner.os }}-stock-data-${{ github.run_id }}
-          restore-keys: |
-            ${{ runner.os }}-stock-data-
 
       - name: Run Apex Scanner
         env:
