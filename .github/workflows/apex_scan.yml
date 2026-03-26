@@ -24,7 +24,7 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install --upgrade pip
-          pip install Pillow requests yfinance gspread oauth2client lmxl
+          pip install Pillow yfinance pandas numpy gspread oauth2client google-generativeai requests lxml
           
       - name: Run Apex Scanner
         env:
