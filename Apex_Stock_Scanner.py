@@ -13,137 +13,158 @@ from concurrent.futures import ThreadPoolExecutor
 CACHE_DIR = "data_cache"
 CACHE_FILE = os.path.join(CACHE_DIR, "russell_1000_2y.pkl")
 
+def fetch_ticker_info(t):
+    try:
+        ticker = yf.Ticker(t)
+        return t, ticker.info
+    except:
+        return t, {}
+
 def get_russell_1000():
     url = "https://en.wikipedia.org/wiki/Russell_1000_Index"
     try:
-        wiki_tables = pd.read_html(urlopen(Request(url, headers={'User-Agent': 'Mozilla/5.0'})))
+        wiki_tables = pd.read_html(urlopen(Request(url, headers={'User-Agent': 'v'})))
         for table in wiki_tables:
             if 'Symbol' in table.columns:
                 return [str(t).strip().replace('.', '-') for t in table['Symbol'].tolist()]
     except: return []
-
-def calculate_rsi(series, period=14):
-    if len(series) < period: return pd.Series([np.nan] * len(series))
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / (loss + 1e-9)
-    return 100 - (100 / (1 + rs))
+    return []
 
 def run_scanner():
     try:
-        # 1. SETUP
-        token = os.environ.get('TELEGRAM_BOT_TOKEN')
-        chat = os.environ.get('TELEGRAM_CHAT_ID')
+        # 1. AUTH & CONFIG
+        token, chat = os.environ.get('TELEGRAM_BOT_TOKEN'), os.environ.get('TELEGRAM_CHAT_ID')
         creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
         gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
         sh = gc.open("Stock Scanner")
 
+        # 2. TICKER SELECTION & CACHING
         tkrs = get_russell_1000()
-        results = []
-        final_cache = {}
-
-        print(f"🚀 Scanning {len(tkrs)} tickers...")
-
-        # 2. SCANNING LOOP
-        for t in tkrs:
-            try:
-                # Individual download for reliability
-                df = yf.download(t, period="2y", progress=False, interval="1d")
-                if df.empty or len(df) < 212: continue
-                
-                final_cache[t] = df
-
-                close = float(df['Close'].iloc[-1])
-                sma200 = float(df['Close'].rolling(200).mean().iloc[-1])
-                atr = float((df['High'] - df['Low']).rolling(14).mean().iloc[-1])
-                df['RSI'] = calculate_rsi(df['Close'])
-                rsi_window = df['RSI'].tail(12).dropna()
-                
-                if rsi_window.empty: continue
-
-                curr_rsi = float(df['RSI'].iloc[-1])
-                recent_high = float(df['High'].tail(2).max())
-                recent_low = float(df['Low'].tail(2).min())
-
-                # LONG CRITERIA
-                if close > sma200 and rsi_window.min() < 42:
-                    days_since = int(len(rsi_window) - rsi_window.argmin() - 1)
-                    buy_trigger = round(recent_high * 1.005, 2)
-                    stop_loss = round(buy_trigger - (atr * 2.5), 2)
-                    if (buy_trigger - stop_loss) / buy_trigger <= 0.12:
-                        results.append({'Stock': t, 'Type': 'LONG', 'RSI': int(curr_rsi), 'Power_Score': round((42 - rsi_window.min()) * 5, 2), 'Buy_At': buy_trigger, 'Sell_At': '', 'Days_Since': days_since, 'Stop_Loss': stop_loss, 'Target_1': round(buy_trigger * 1.25, 2), 'Price': round(close, 2), 'df_ptr': df})
-
-                # SHORT CRITERIA
-                elif close < sma200 and rsi_window.max() > 58:
-                    days_since = int(len(rsi_window) - rsi_window.argmax() - 1)
-                    sell_trigger = round(recent_low * 0.995, 2)
-                    stop_loss = round(sell_trigger + (atr * 2.5), 2)
-                    if (stop_loss - sell_trigger) / sell_trigger <= 0.12:
-                        results.append({'Stock': t, 'Type': 'SHORT', 'RSI': int(curr_rsi), 'Power_Score': round((rsi_window.max() - 58) * 5, 2), 'Buy_At': '', 'Sell_At': sell_trigger, 'Days_Since': days_since, 'Stop_Loss': stop_loss, 'Target_1': round(sell_trigger * 0.85, 2), 'Price': round(close, 2), 'df_ptr': df})
-            except: continue
-
-        # Save cache for persistence across runs
-        if not os.path.exists(CACHE_DIR): os.makedirs(CACHE_DIR)
-        pd.to_pickle(final_cache, CACHE_FILE)
-
-        if not results:
-            print("⚠️ No setups found today.")
+        if not tkrs:
+            print("❌ Failed to fetch tickers.")
             return
 
-        # 3. METADATA & REPORTING
-        final_df = pd.DataFrame(results).sort_values('Power_Score', ascending=False)
+        print(f"Downloading history for {len(tkrs)} stocks...")
         
-        def get_info(t):
-            try: return t, yf.Ticker(t).info
-            except: return t, {}
+        # Safe Download with Cache Logic
+        if not os.path.exists(CACHE_DIR): os.makedirs(CACHE_DIR)
         
+        # Attempt to pull from Yahoo (Standard Bulk)
+        data = yf.download(tkrs + ["SPY"], period="2y", group_by='ticker', progress=False)
+        
+        # Logic to handle Yahoo "Invalid Crumb" or empty data errors
+        if data is None or data.empty:
+            print("⚠️ Yahoo Bulk failed. Attempting to load last valid cache...")
+            if os.path.exists(CACHE_FILE):
+                data = pd.read_pickle(CACHE_FILE)
+            else:
+                print("❌ No cache found. Execution stopped.")
+                return
+        else:
+            # Save successful download to cache
+            data.to_pickle(CACHE_FILE)
+
+        spy_close = data['SPY']['Close']
+
+        # 3. PARALLEL INFO FETCH
+        print("Fetching fundamentals in parallel...")
+        info_map = {}
         with ThreadPoolExecutor(max_workers=10) as executor:
-            info_map = dict(executor.map(get_info, [r['Stock'] for r in results[:50]]))
+            results_info = list(executor.map(fetch_ticker_info, tkrs))
+            for t, info in results_info:
+                info_map[t] = info
 
-        full_report = []
-        for _, row in final_df.head(50).iterrows():
-            t, df_t, info = row.Stock, row['df_ptr'], info_map.get(row.Stock, {})
-            vol_avg = df_t['Volume'].rolling(20).mean().iloc[-1]
-            
-            full_report.append({
-                'Stock': t, 
-                'Squeeze': f"{row.Type} (RSI:{row.RSI})", 
-                'Power_Score': row.Power_Score,
-                'Vol_Surge': f"{df_t['Volume'].iloc[-1]/vol_avg:.2f}x" if vol_avg > 0 else "1.0x",
-                'Buy_At': row.Buy_At, 
-                'Sell_At': row.Sell_At, 
-                'RSI_Days': row.Days_Since,
-                'Stop_Loss': row.Stop_Loss, 
-                'Target_1': row.Target_1,
-                'Gross_M': f"{(info.get('grossMargins', 0) or 0)*100:.0f}%",
-                'Mkt_Cap': f"{(info.get('marketCap', 0) or 0)/1e9:.1f}B",
-                'Price': row.Price, 
-                'YTD': round(((row.Price/df_t['Close'].iloc[0])-1)*100, 1)
-            })
+        results = []
+        for t in tkrs:
+            try:
+                # Handle MultiIndex check to prevent the "zero-size" error
+                if t not in data.columns.levels[0]: continue
+                
+                df = data[t].dropna()
+                if len(df) < 150: continue
+                
+                # --- SQUEEZE & MOMENTUM LOGIC (YOUR ORIGINAL) ---
+                sma = df['Close'].rolling(20).mean()
+                std = df['Close'].rolling(20).std()
+                upper_bb, lower_bb = sma + (std * 2), sma - (std * 2)
+                atr = (df['High']-df['Low']).rolling(14).mean()
+                
+                # Squeeze Criteria
+                is_squeeze = 1 if (lower_bb.iloc[-1] > (sma.iloc[-1] - (atr.iloc[-1]*1.5))) and \
+                                  (upper_bb.iloc[-1] < (sma.iloc[-1] + (atr.iloc[-1]*1.5))) else 0
+                
+                vol_ratio = df['Volume'].iloc[-1] / df['Volume'].rolling(20).mean().iloc[-1]
+                
+                # Relative Strength vs SPY
+                spy_current = spy_close.reindex(df.index).iloc[-1]
+                spy_past = spy_close.reindex(df.index).iloc[-150]
+                rs_val = ((df['Close'].iloc[-1]/spy_current)/(df['Close'].iloc[-150]/spy_past)-1)*100
+                
+                power_score = (is_squeeze * 50) + (min(rs_val, 30)) + (min(vol_ratio * 5, 20))
+                
+                info = info_map.get(t, {})
+                
+                # EXACT COLUMN ORDER FROM ORIGINAL SCRIPT
+                results.append({
+                    'Stock': t, 
+                    'Squeeze': "ACTIVE" if is_squeeze else "OFF", 
+                    'Power_Score': round(power_score, 2),
+                    'Vol_Surge': f"{vol_ratio:.2f}x", 
+                    'Buy_At': round(df['Close'].iloc[-1], 2),
+                    'Stop_Loss': round(df['Close'].iloc[-1] * 0.93, 2), 
+                    'Target_1': round(info.get('targetHighPrice', df['Close'].iloc[-1] * 1.25), 2),
+                    'Gross_M': f"{info.get('grossMargins', 0)*100:.0f}%", 
+                    'EBIT_M': f"{info.get('ebitdaMargins', 0)*100:.0f}%",
+                    'Mkt_Cap': f"{info.get('marketCap', 0)/1e9:.1f}B", 
+                    'Price': round(df['Close'].iloc[-1], 2),
+                    'YTD': round(((df['Close'].iloc[-1]/df['Close'].iloc[0])-1)*100, 1)
+                })
+            except: continue
 
-        # 4. GOOGLE SHEETS UPDATE
-        core_df = pd.DataFrame(full_report)
-        for name, d_frame in [("Summary", core_df.head(5)), ("Core Screener", core_df)]:
-            ws = sh.worksheet(name)
+        df_full = pd.DataFrame(results).sort_values('Power_Score', ascending=False)
+        
+        # 4. UPDATE SHEETS (MATCHING ORIGINAL FORMAT)
+        for sn in ["Summary", "Core Screener"]:
+            ws = sh.worksheet(sn)
             ws.clear()
-            ws.update([d_frame.columns.tolist()] + d_frame.astype(str).values.tolist())
+            up_df = df_full.head(10) if sn == "Summary" else df_full
+            ws.update([up_df.columns.tolist()] + up_df.astype(str).values.tolist())
 
-        # 5. TELEGRAM ALERTS
-        for _, row in core_df.head(5).iterrows():
-            t, hist = row.Stock, final_cache[row.Stock].tail(100)
+        # 5. DISPATCH TELEGRAM CHARTS
+        for _, row in df_full.head(5).iterrows():
+            ticker_symbol = row.Stock
+            hist = data[ticker_symbol].tail(120)
+            
+            # Indicators for Chart
+            sma20 = hist['Close'].rolling(20).mean()
+            std20 = hist['Close'].rolling(20).std()
+            upper_bb_p, lower_bb_p = sma20 + (std20 * 2), sma20 - (std20 * 2)
+            sma200 = data[ticker_symbol]['Close'].rolling(200).mean().tail(120)
+
+            apds = [
+                mpf.make_addplot(upper_bb_p, color='gray', width=0.8, linestyle='dashed'),
+                mpf.make_addplot(lower_bb_p, color='gray', width=0.8, linestyle='dashed'),
+                mpf.make_addplot(sma200, color='blue', width=1.5)
+            ]
+
             buf = io.BytesIO()
-            mpf.plot(hist, type='candle', addplot=[mpf.make_addplot(hist['Close'].rolling(200).mean(), color='blue')], style='charles', savefig=buf)
+            mpf.plot(hist, type='candle', addplot=apds, style='charles', volume=True, savefig=buf, tight_layout=True)
             buf.seek(0)
-            is_long = "LONG" in row.Squeeze
-            caption = (f"<b>{'🎯 BUY' if is_long else '💀 SELL'}: {t}</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                       f"💰 <b>Last:</b> ${row.Price} | ⏳ <b>Age:</b> {row.RSI_Days}d\n"
-                       f"⚔️ <b>Trigger:</b> ${row.Buy_At if is_long else row.Sell_At}\n"
-                       f"🛡️ <b>Stop:</b> ${row.Stop_Loss} | 🏁 <b>Target:</b> ${row.Target_1}\n"
-                       f"━━━━━━━━━━━━━━━━━━━━\n📊 <i>Score: {row.Power_Score}</i>")
-            requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", files={'photo': (f'{t}.png', buf)}, data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
 
-        print("✅ Scan Complete. Success.")
+            caption = (
+                f"<b>{ticker_symbol}</b>\n"
+                f"💰 Price: ${row.Price}\n"
+                f"🎯 Buy: ${row.Buy_At} | Target: ${row.Target_1}\n"
+                f"🛑 Stop: ${row.Stop_Loss}\n"
+                f"📊 Power Score: {row.Power_Score}"
+            )
+
+            requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", 
+                          files={'photo': (f'{ticker_symbol}.png', buf)}, 
+                          data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
+            plt.close('all')
+
+        print("Process Completed Successfully.")
     except Exception as e: print(f"FATAL ERROR: {e}")
 
 if __name__ == "__main__":
