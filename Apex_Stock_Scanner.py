@@ -29,7 +29,7 @@ def calculate_rsi(series, period=14):
 
 def run_scanner():
     try:
-        # 1. AUTH
+        # 1. AUTH & SHEET SETUP
         token, chat = os.environ.get('TELEGRAM_BOT_TOKEN'), os.environ.get('TELEGRAM_CHAT_ID')
         creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
         gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
@@ -38,100 +38,106 @@ def run_scanner():
         tkrs = get_russell_1000()
         if not tkrs: return
 
-        # 2. DATA (Russell 1000 is ~1000 tickers + SPY)
+        # 2. DATA DOWNLOAD & CACHE
         if not os.path.exists(CACHE_DIR): os.makedirs(CACHE_DIR)
         data = yf.download(tkrs + ["SPY"], period="2y", group_by='ticker', progress=False)
         
-        if data.empty and os.path.exists(CACHE_FILE):
+        if (data is None or data.empty) and os.path.exists(CACHE_FILE):
             data = pd.read_pickle(CACHE_FILE)
-        else:
+        elif data is not None and not data.empty:
             data.to_pickle(CACHE_FILE)
+        else:
+            return
 
         results = []
 
-        # 3. APEX LOGIC
+        # 3. APEX LOGIC (Target Added)
         for t in tkrs:
             try:
                 if t not in data.columns.levels[0]: continue
                 df = data[t].dropna().copy()
                 if len(df) < 210: continue
                 
-                # Keep index as DatetimeIndex for mplfinance
                 df.index = pd.to_datetime(df.index)
-                
                 df['RSI'] = calculate_rsi(df['Close'])
-                sma200 = df['Close'].rolling(200).mean()
+                sma200 = df['Close'].rolling(200).mean().iloc[-1]
                 atr = (df['High']-df['Low']).rolling(14).mean().iloc[-1]
                 close = float(df['Close'].iloc[-1])
                 
                 rsi_window = df['RSI'].tail(12)
-                
                 setup_type = None
-                if close > sma200.iloc[-1] and rsi_window.min() < 42:
+                
+                if close > sma200 and rsi_window.min() < 42:
                     setup_type = "LONG"
                     p_score = round((42 - rsi_window.min()) * 5, 2)
                     age = int(len(rsi_window) - rsi_window.argmin() - 1)
                     trigger = round(df['High'].tail(2).max() * 1.005, 2)
                     stop = round(trigger - (atr * 2.5), 2)
-                elif close < sma200.iloc[-1] and rsi_window.max() > 58:
+                    target = round(trigger * 1.25, 2) # +25%
+                elif close < sma200 and rsi_window.max() > 58:
                     setup_type = "SHORT"
                     p_score = round((rsi_window.max() - 58) * 5, 2)
                     age = int(len(rsi_window) - rsi_window.argmax() - 1)
                     trigger = round(df['Low'].tail(2).min() * 0.995, 2)
                     stop = round(trigger + (atr * 2.5), 2)
+                    target = round(trigger * 0.85, 2) # -15%
 
                 if setup_type and (abs(trigger - stop) / trigger) <= 0.12:
-                    # Quick Market Cap approximation to save time
                     vol_surge = df['Volume'].iloc[-1]/df['Volume'].rolling(20).mean().iloc[-1]
                     results.append({
-                        'Stock': t, 'Squeeze': f"{setup_type} (Age:{age}d)", 'Power_Score': p_score,
+                        'Stock': t, 
+                        'Squeeze': f"{setup_type} (Age:{age}d)", 
+                        'Power_Score': p_score,
                         'Vol_Surge': f"{vol_surge:.2f}x",
                         'Buy_At': trigger if setup_type == "LONG" else "",
                         'Sell_At': trigger if setup_type == "SHORT" else "",
-                        'Stop_Loss': stop, 'Price': round(close, 2),
-                        'Mkt_Cap': "N/A", # Removed slow fetch
+                        'Stop_Loss': stop,
+                        'Target': target,
+                        'Price': round(close, 2),
                         'YTD': round(((close/df['Close'].iloc[0])-1)*100, 1),
+                        'Age_Value': age, 
                         'df_ptr': df,
-                        'sma200_ser': sma200
+                        'sma200_val': df['Close'].rolling(200).mean()
                     })
             except: continue
 
-        # 4. SHEET UPDATES
-        df_full = pd.DataFrame(results).sort_values('Power_Score', ascending=False)
-        for sn in ["Summary", "Core Screener"]:
-            ws = sh.worksheet(sn)
-            ws.clear()
-            limit = 5 if sn == "Summary" else 50
-            out = df_full.head(limit).drop(columns=['df_ptr', 'sma200_ser'])
-            ws.update([out.columns.tolist()] + out.astype(str).values.tolist())
+        # 4. SORTING & UPLOAD (Top 5 Summary)
+        df_full = pd.DataFrame(results)
+        if not df_full.empty:
+            df_full = df_full.sort_values(by=['Power_Score', 'Age_Value'], ascending=[False, True])
 
-        # 5. TELEGRAM (No-Gap Charting)
-        for _, row in df_full.head(5).iterrows():
-            t = row.Stock
-            # Slice last 100 days for visual clarity
-            hist = row['df_ptr'].tail(100)
-            sma200_slice = row['sma200_ser'].tail(100)
-            
-            buf = io.BytesIO()
-            # show_nontrading=False removes the weekend gaps without breaking the index
-            mpf.plot(hist, type='candle', 
-                     addplot=[mpf.make_addplot(sma200_slice, color='blue', width=1.2)], 
-                     style='charles', volume=True, savefig=buf, 
-                     tight_layout=True, show_nontrading=False)
-            buf.seek(0)
+            for sn in ["Summary", "Core Screener"]:
+                ws = sh.worksheet(sn)
+                ws.clear()
+                limit = 5 if sn == "Summary" else 50
+                final_cols = df_full.head(limit).drop(columns=['df_ptr', 'sma200_val', 'Age_Value'])
+                ws.update([final_cols.columns.tolist()] + final_cols.astype(str).values.tolist())
 
-            caption = (f"<b>{row.Squeeze}: {t}</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                       f"💰 Last: ${row.Price}\n"
-                       f"⚔️ Trigger: ${row.Buy_At if row.Buy_At else row.Sell_At}\n"
-                       f"🛡️ Stop: ${row.Stop_Loss}\n"
-                       f"📊 Power Score: {row.Power_Score}")
+            # 5. TELEGRAM CHARTS
+            for _, row in df_full.head(5).iterrows():
+                t, hist = row.Stock, row['df_ptr'].tail(100)
+                sma200_plt = row['sma200_val'].tail(100)
+                
+                buf = io.BytesIO()
+                mpf.plot(hist, type='candle', 
+                         addplot=[mpf.make_addplot(sma200_plt, color='blue', width=1.2)], 
+                         style='charles', volume=True, savefig=buf, 
+                         tight_layout=True, show_nontrading=False)
+                buf.seek(0)
 
-            requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", 
-                          files={'photo': (f'{t}.png', buf)}, 
-                          data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
-            plt.close('all')
+                caption = (f"<b>{row.Squeeze}: {t}</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                           f"💰 Last: ${row.Price}\n"
+                           f"⚔️ Trigger: ${row.Buy_At if row.Buy_At else row.Sell_At}\n"
+                           f"🛡️ Stop: ${row.Stop_Loss}\n"
+                           f"🏁 Target: ${row.Target}\n"
+                           f"📊 Power Score: {row.Power_Score}")
 
-        print("✅ Scan Complete. Charts and Sheets updated.")
+                requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", 
+                              files={'photo': (f'{t}.png', buf)}, 
+                              data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
+                plt.close('all')
+
+        print("✅ Scan Complete. Targets added and Freshness sorted.")
     except Exception as e: print(f"FATAL ERROR: {e}")
 
 if __name__ == "__main__":
