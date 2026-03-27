@@ -28,51 +28,71 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def run_backtest_on_sheet(sh):
+    """Backtester Dashboard - Formatted to the Right (Column J)"""
     try:
         ws_bt = sh.worksheet("Backtester")
     except:
         ws_bt = sh.add_worksheet(title="Backtester", rows="200", cols="20")
     
-    ticker = ws_bt.acell('A2').value
-    if not ticker: ticker = "SPY"
+    ticker = ws_bt.acell('J2').value
+    if not ticker: 
+        ticker = "SPY"
+        ws_bt.update('J1:J2', [['ENTER TICKER:'], [ticker]])
 
     df = yf.download(ticker, period="2y", progress=False)
     if df.empty: return
 
-    df['RSI'] = calculate_rsi(df['Close'])
+    # Core Math
+    df['RSI'] = calculate_rsi(df['Close']).round(2)
     df['Pct_Chg'] = df['Close'].pct_change()
-    
     df['Signal'] = 0
     df.loc[df['RSI'] < 32, 'Signal'] = 1
     df.loc[df['RSI'] > 68, 'Signal'] = -1
     
     df['Strategy_Ret'] = df['Signal'].shift(1) * df['Pct_Chg']
-    df['Cum_Strategy'] = (1 + df['Strategy_Ret'].fillna(0)).cumprod() - 1
-    df['Cum_Hold'] = (1 + df['Pct_Chg'].fillna(0)).cumprod() - 1
+    df['Cum_Strategy'] = ((1 + df['Strategy_Ret'].fillna(0)).cumprod() - 1)
+    df['Cum_Hold'] = ((1 + df['Pct_Chg'].fillna(0)).cumprod() - 1)
     
+    # Advanced Metrics
     trades = df[df['Signal'].shift(1) != 0]
-    win_rate = (len(trades[trades['Strategy_Ret'] > 0]) / len(trades) * 100) if len(trades) > 0 else 0
+    total_trades = len(trades)
+    wins = trades[trades['Strategy_Ret'] > 0]['Strategy_Ret']
+    losses = trades[trades['Strategy_Ret'] < 0]['Strategy_Ret']
     
+    win_rate = (len(wins) / total_trades * 100) if total_trades > 0 else 0
+    profit_factor = (wins.sum() / abs(losses.sum())) if len(losses) > 0 and losses.sum() != 0 else 0
+    max_dd = ((df['Cum_Strategy'] + 1) / (df['Cum_Strategy'] + 1).cummax() - 1).min()
+    
+    # Dashboard Data
     stats = [
-        ["METRIC", "VALUE"],
+        ["--- PERFORMANCE ---", ""],
+        ["Ticker Tested", ticker],
         ["Win Rate", f"{win_rate:.2f}%"],
-        ["Strategy Ret", f"{df['Cum_Strategy'].iloc[-1]*100:.2f}%"],
-        ["Buy & Hold", f"{df['Cum_Hold'].iloc[-1]*100:.2f}%"],
-        ["Alpha", f"{(df['Cum_Strategy'].iloc[-1] - df['Cum_Hold'].iloc[-1])*100:.2f}%"]
+        ["Profit Factor", f"{profit_factor:.2f}"],
+        ["Strategy Return", f"{(df['Cum_Strategy'].iloc[-1]*100):.2f}%"],
+        ["Buy & Hold", f"{(df['Cum_Hold'].iloc[-1]*100):.2f}%"],
+        ["Alpha (Purity)", f"{((df['Cum_Strategy'].iloc[-1] - df['Cum_Hold'].iloc[-1])*100):.2f}%"],
+        ["--- RISK ---", ""],
+        ["Max Drawdown", f"{(max_dd*100):.2f}%"],
+        ["Trade Days", f"{total_trades}"],
+        ["Expectancy (%)", f"{(trades['Strategy_Ret'].mean()*100):.2f}%"],
+        ["Last Update", datetime.now().strftime("%H:%M:%S")]
     ]
-    # Update stats dashboard
-    ws_bt.update('D1:E5', stats)
 
-    # Prepare backtest data for upload - removing multi-index issues
-    bt_display = df[['Close', 'RSI', 'Signal', 'Cum_Strategy']].tail(100).reset_index()
-    bt_display.columns = ['Date', 'Close', 'RSI', 'Signal', 'Cum_Strategy'] # Explicit headers
+    # Data Display (Left Side)
+    bt_display = df[['Close', 'RSI', 'Signal', 'Cum_Strategy']].tail(150).reset_index()
+    bt_display.columns = ['Date', 'Close', 'RSI', 'Signal', 'Cum_Strategy']
     bt_display['Date'] = bt_display['Date'].dt.strftime('%Y-%m-%d')
+    bt_display['Close'] = bt_display['Close'].round(2)
+    bt_display['Cum_Strategy'] = (bt_display['Cum_Strategy'] * 100).round(2)
     
-    # Convert to list of strings (following original script's logic)
-    upload_data = [bt_display.columns.tolist()] + bt_display.astype(str).values.tolist()
-    ws_bt.update('A9', upload_data)
+    ws_bt.clear()
+    ws_bt.update('A1', [bt_display.columns.tolist()] + bt_display.astype(str).values.tolist())
+    ws_bt.update('J1:J2', [['ENTER TICKER:'], [ticker]])
+    ws_bt.update('J4:K15', stats)
 
 def run_scanner():
+    """CORE SCANNER - FIXED TEMPLATE (RESTORED)"""
     try:
         # 1. AUTH & SHEET SETUP
         token, chat = os.environ.get('TELEGRAM_BOT_TOKEN'), os.environ.get('TELEGRAM_CHAT_ID')
@@ -80,12 +100,13 @@ def run_scanner():
         gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
         sh = gc.open("Stock Scanner")
 
+        # Backtester Component
         run_backtest_on_sheet(sh)
 
         tkrs = get_russell_1000()
         if not tkrs: return
 
-        # 2. DATA DOWNLOAD & CACHE (EXACT ORIGINAL CODE)
+        # 2. DATA DOWNLOAD & CACHE (ORIGINAL PLUMBING)
         if not os.path.exists(CACHE_DIR): os.makedirs(CACHE_DIR)
         data = yf.download(tkrs + ["SPY"], period="2y", group_by='ticker', progress=False)
         
@@ -98,7 +119,7 @@ def run_scanner():
 
         results = []
 
-        # 3. APEX LOGIC (Target SMA200 / Wilder's RSI)
+        # 3. APEX LOGIC
         for t in tkrs:
             try:
                 if t not in data.columns.levels[0]: continue
@@ -148,7 +169,7 @@ def run_scanner():
                     })
             except: continue
 
-        # 4. SORTING & UPLOAD (EXACT ORIGINAL CODE)
+        # 4. SORTING & UPLOAD (ORIGINAL LAYOUT)
         df_full = pd.DataFrame(results)
         if not df_full.empty:
             df_full = df_full.sort_values(by=['Power_Score', 'Age_Value'], ascending=[False, True])
@@ -160,7 +181,7 @@ def run_scanner():
                 final_cols = df_full.head(limit).drop(columns=['df_ptr', 'sma200_val', 'Age_Value'])
                 ws.update([final_cols.columns.tolist()] + final_cols.astype(str).values.tolist())
 
-            # 5. TELEGRAM CHARTS
+            # 5. TELEGRAM CHARTS (ORIGINAL LAYOUT)
             for _, row in df_full.head(5).iterrows():
                 t, hist = row.Stock, row['df_ptr'].tail(100)
                 sma200_plt = row['sma200_val'].tail(100)
@@ -184,7 +205,7 @@ def run_scanner():
                               data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
                 plt.close('all')
 
-        print("✅ Scan Complete.")
+        print("✅ Scan Complete. Full original template and backtester restored.")
     except Exception as e: print(f"FATAL ERROR: {e}")
 
 if __name__ == "__main__":
