@@ -14,10 +14,14 @@ CACHE_FILE = os.path.join(CACHE_DIR, "sp500_apex_2y.pkl")
 def get_sp500_tickers():
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     try:
+        # Wikipedia table for S&P 500
         wiki_tables = pd.read_html(urlopen(Request(url, headers={'User-Agent': 'v'})))
         df = wiki_tables[0]
+        # Clean symbols (BRK.B -> BRK-B) for Yahoo Finance compatibility
         return [str(t).strip().replace('.', '-') for t in df['Symbol'].tolist()]
-    except: return []
+    except Exception as e:
+        print(f"Error fetching S&P 500 list: {e}")
+        return []
 
 def calculate_rsi(series, period=14):
     delta = series.diff()
@@ -27,17 +31,24 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def run_scanner():
-    """S&P 500 APEX SCANNER - BI-DIRECTIONAL (LONG DIPS & SHORT BREAKDOWNS)"""
+    """S&P 500 APEX SCANNER - BI-DIRECTIONAL TOP 100"""
     try:
-        token, chat = os.environ.get('TELEGRAM_BOT_TOKEN'), os.environ.get('TELEGRAM_CHAT_ID')
+        # Load environment variables for APIs
+        token = os.environ.get('TELEGRAM_BOT_TOKEN')
+        chat = os.environ.get('TELEGRAM_CHAT_ID')
         creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
-        gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
+        
+        # Authorize Google Sheets
+        gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(
+            creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
         sh = gc.open("Stock Scanner")
 
         tkrs = get_sp500_tickers()
         if not tkrs: return
 
         if not os.path.exists(CACHE_DIR): os.makedirs(CACHE_DIR)
+        
+        # Download Data
         data = yf.download(tkrs + ["SPY"], period="2y", group_by='ticker', progress=False)
         
         if (data is None or data.empty) and os.path.exists(CACHE_FILE):
@@ -53,60 +64,77 @@ def run_scanner():
                 df = data[t].dropna().copy()
                 if len(df) < 210: continue
                 
-                df.index = pd.to_datetime(df.index); df = df.sort_index()
+                df.index = pd.to_datetime(df.index)
+                df = df.sort_index()
+                
+                # Apex Indicators
                 df['RSI'] = calculate_rsi(df['Close'])
                 df['SMA200'] = df['Close'].rolling(200).mean()
                 df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
                 
-                close, sma200, atr = float(df['Close'].iloc[-1]), df['SMA200'].iloc[-1], df['ATR'].iloc[-1]
-                rsi_window = df['RSI'].tail(10)
+                close = float(df['Close'].iloc[-1])
+                sma200 = df['SMA200'].iloc[-1]
+                atr = df['ATR'].iloc[-1]
+                rsi_window = df['RSI'].tail(12)
                 
                 setup_type = None
                 trigger, stop, target, p_score, age = 0, 0, 0, 0, 0
 
-                # --- LONG LOGIC: QUALITY DIP (Above 200 SMA + 3-Day High Break) ---
+                # --- LONG: Quality Dip (Above 200 SMA + 3-Day High Break) ---
                 if close > sma200 and rsi_window.min() < 35:
                     setup_type = "LONG"
                     p_score = round((40 - rsi_window.min()) * 5, 2)
                     age = int(len(rsi_window) - rsi_window.values.argmin() - 1)
+                    # Trigger is the High of the last 3 trading days
                     trigger = round(df['High'].tail(3).max() * 1.005, 2)
                     stop = round(df['Low'].tail(5).min() - (atr * 1.5), 2)
-                    target = round(close + (abs(close - stop) * 1.5), 2)
-
-                # --- SHORT LOGIC: STRUCTURAL BREAKDOWN (Below 200 SMA + 3-Day Low Break) ---
+                    target = round(close + (abs(close - stop) * 2.0), 2)
+                
+                # --- SHORT: Structural Breakdown (Below 200 SMA + 3-Day Low Break) ---
                 elif close < sma200 and rsi_window.max() > 65:
                     setup_type = "SHORT"
                     p_score = round((rsi_window.max() - 60) * 5, 2)
                     age = int(len(rsi_window) - rsi_window.values.argmax() - 1)
+                    # Trigger is the Low of the last 3 trading days
                     trigger = round(df['Low'].tail(3).min() * 0.995, 2)
                     stop = round(df['High'].tail(5).max() + (atr * 1.5), 2)
-                    target = round(close - (abs(stop - close) * 1.5), 2)
+                    target = round(close - (abs(stop - close) * 2.0), 2)
 
                 if setup_type:
                     dist = abs(close - trigger) / close
-                    vol_surge = df['Volume'].iloc[-1]/df['Volume'].rolling(20).mean().iloc[-1]
+                    vol_surge = df['Volume'].iloc[-1] / df['Volume'].rolling(20).mean().iloc[-1]
                     
                     results.append({
-                        'Stock': t, 'Squeeze': f"{setup_type} (Age:{age}d)", 'Power_Score': p_score,
+                        'Stock': t, 
+                        'Squeeze': f"{setup_type} (Age:{age}d)", 
+                        'Power_Score': p_score,
                         'Vol_Surge': f"{vol_surge:.2f}x", 
                         'Buy_At': trigger if setup_type == "LONG" else "",
                         'Sell_At': trigger if setup_type == "SHORT" else "",
-                        'Stop_Loss': stop, 'Target': target, 'Price': round(close, 2),
+                        'Stop_Loss': stop, 
+                        'Target': target, 
+                        'Price': round(close, 2),
                         'YTD': round(((close/df['Close'].iloc[0])-1)*100, 1),
-                        'Dist_To_Trigger': dist, 'df_ptr': df, 'sma200_val': df['SMA200']
+                        'Dist_To_Trigger': dist,
+                        'df_ptr': df, 
+                        'sma200_val': df['SMA200']
                     })
             except: continue
 
         df_full = pd.DataFrame(results)
         if not df_full.empty:
+            # Sort by Proximity to Trigger (find the most actionable trades)
             df_full = df_full.sort_values(by=['Dist_To_Trigger', 'Power_Score'], ascending=[True, False])
             
+            # Export to Google Sheets
             for sn in ["Summary", "Core Screener"]:
                 ws = sh.worksheet(sn); ws.clear()
-                limit = 5 if sn == "Summary" else 50
+                # TOP 100 for Core Screener, Top 5 for Summary
+                limit = 5 if sn == "Summary" else 100
                 final_cols = df_full.head(limit).drop(columns=['df_ptr', 'sma200_val', 'Dist_To_Trigger'])
                 ws.update([final_cols.columns.tolist()] + final_cols.astype(str).values.tolist())
 
+            # Telegram Alerts for top 5 most actionable
             for _, row in df_full.head(5).iterrows():
                 t, hist, sma200_plt = row.Stock, row['df_ptr'].tail(100), row['sma200_val'].tail(100)
                 buf = io.BytesIO()
@@ -114,15 +142,21 @@ def run_scanner():
                          style='charles', volume=True, savefig=buf, tight_layout=True)
                 buf.seek(0)
                 
-                icon = "💎" if "LONG" in row.Squeeze else "💀"
+                icon = "🛡️" if "LONG" in row.Squeeze else "⚠️"
                 trigger_val = row.Buy_At if row.Buy_At else row.Sell_At
-                caption = (f"<b>{icon} {t}: {row.Squeeze}</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                           f"⚔️ Trigger: ${trigger_val}\n💰 Price: ${row.Price}\n"
-                           f"🛡️ Stop: ${row.Stop_Loss}\n🏁 Target: ${row.Target}\n📊 Power Score: {row.Power_Score}")
+                caption = (f"<b>{icon} {t} | {row.Squeeze}</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                           f"⚔️ Trigger (3D L/H): ${trigger_val}\n"
+                           f"💰 Last Price: ${row.Price}\n"
+                           f"🛡️ Stop Loss: ${row.Stop_Loss}\n"
+                           f"🏁 Target (2R): ${row.Target}\n"
+                           f"📊 Power Score: {row.Power_Score}")
                 
-                requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", files={'photo': (f'{t}.png', buf)}, data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
+                requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", 
+                              files={'photo': (f'{t}.png', buf)}, 
+                              data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
                 plt.close('all')
-        print("✅ Bi-Directional Apex Scanner Finished.")
+                
+        print(f"✅ Apex S&P 500 Scanner Complete. {len(df_full)} candidates found, Top 100 listed.")
     except Exception as e: print(f"FATAL ERROR: {e}")
 
 if __name__ == "__main__":
