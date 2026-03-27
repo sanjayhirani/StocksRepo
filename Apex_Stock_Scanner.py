@@ -20,8 +20,15 @@ def get_russell_1000():
                 return [str(t).strip().replace('.', '-') for t in table['Symbol'].tolist()]
     except: return []
 
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
+    rs = gain / (loss + 1e-9)
+    return 100 - (100 / (1 + rs))
+
 def run_scanner():
-    """APEX BULL RUN SCANNER - Integrated Backtester Logic"""
+    """CORE SCANNER - FIXED TEMPLATE (Summary, Core, Telegram)"""
     try:
         token, chat = os.environ.get('TELEGRAM_BOT_TOKEN'), os.environ.get('TELEGRAM_CHAT_ID')
         creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
@@ -41,87 +48,61 @@ def run_scanner():
         else: return
 
         results = []
-        VOL_STOP_PCT = 0.25 # Backtester Constant
-
         for t in tkrs:
             try:
                 if t not in data.columns.levels[0]: continue
                 df = data[t].dropna().copy()
                 if len(df) < 210: continue
-                
-                # Indicators
-                df['SMA200'] = df['Close'].rolling(200).mean()
+                df.index = pd.to_datetime(df.index)
+                df['RSI'] = calculate_rsi(df['Close'])
+                sma200_val = df['Close'].rolling(200).mean().iloc[-1]
+                atr = (df['High']-df['Low']).rolling(14).mean().iloc[-1]
                 close = float(df['Close'].iloc[-1])
-                sma200_val = df['SMA200'].iloc[-1]
+                rsi_window = df['RSI'].tail(12)
+                setup_type = None
                 
-                # APEX LOGIC: Price must be above 200-SMA for Bull Run
-                if close > sma200_val:
-                    # Calculate Trail Stop (25% off 52-week High)
-                    peak_52w = df['Close'].tail(252).max()
-                    apex_stop = round(peak_52w * (1 - VOL_STOP_PCT), 2)
-                    
-                    # Power Score = (Trend Strength % * 0.7) + (Distance from High % * 0.3)
-                    trend_strength = (close - sma200_val) / sma200_val
-                    dist_from_high = 1 - (close / peak_52w)
-                    p_score = round((trend_strength * 100) - (dist_from_high * 50), 2)
+                if rsi_window.min() < 32:
+                    setup_type = "LONG"; p_score = round((32 - rsi_window.min()) * 5, 2)
+                    age = int(len(rsi_window) - rsi_window.argmin() - 1)
+                    trigger = round(df['High'].tail(2).max() * 1.005, 2)
+                    stop = round(trigger - (atr * 2.5), 2); target = round(sma200_val, 2) 
+                elif rsi_window.max() > 68:
+                    setup_type = "SHORT"; p_score = round((rsi_window.max() - 68) * 5, 2)
+                    age = int(len(rsi_window) - rsi_window.argmax() - 1)
+                    trigger = round(df['Low'].tail(2).min() * 0.995, 2)
+                    stop = round(trigger + (atr * 2.5), 2); target = round(sma200_val, 2)
 
+                if setup_type and (abs(trigger - stop) / trigger) <= 0.12:
                     vol_surge = df['Volume'].iloc[-1]/df['Volume'].rolling(20).mean().iloc[-1]
-                    
                     results.append({
-                        'Stock': t, 
-                        'Status': "🚀 BULL RUN", 
-                        'Power_Score': p_score,
-                        'Vol_Surge': f"{vol_surge:.2f}x", 
-                        'Price': round(close, 2),
-                        'SMA200': round(sma200_val, 2),
-                        'Apex_Stop': apex_stop,
-                        'Dist_To_Stop': f"{round(((close-apex_stop)/close)*100, 1)}%",
+                        'Stock': t, 'Squeeze': f"{setup_type} (Age:{age}d)", 'Power_Score': p_score,
+                        'Vol_Surge': f"{vol_surge:.2f}x", 'Buy_At': trigger if setup_type == "LONG" else "",
+                        'Sell_At': trigger if setup_type == "SHORT" else "", 'Stop_Loss': stop,
+                        'Target': target, 'Price': round(close, 2),
                         'YTD': round(((close/df['Close'].iloc[0])-1)*100, 1),
-                        'df_ptr': df
+                        'Age_Value': age, 'df_ptr': df, 'sma200_val': df['Close'].rolling(200).mean()
                     })
             except: continue
 
         df_full = pd.DataFrame(results)
         if not df_full.empty:
-            df_full = df_full.sort_values(by='Power_Score', ascending=False)
-            
-            # Update Google Sheets
+            df_full = df_full.sort_values(by=['Power_Score', 'Age_Value'], ascending=[False, True])
             for sn in ["Summary", "Core Screener"]:
                 ws = sh.worksheet(sn); ws.clear()
-                limit = 5 if sn == "Summary" else 100
-                final_cols = df_full.head(limit).drop(columns=['df_ptr'])
+                limit = 5 if sn == "Summary" else 50
+                final_cols = df_full.head(limit).drop(columns=['df_ptr', 'sma200_val', 'Age_Value'])
                 ws.update([final_cols.columns.tolist()] + final_cols.astype(str).values.tolist())
 
-            # Telegram Alerts
             for _, row in df_full.head(5).iterrows():
-                t, hist = row.Stock, row['df_ptr'].tail(150)
+                t, hist = row.Stock, row['df_ptr'].tail(100)
+                sma200_plt = row['sma200_val'].tail(100)
                 buf = io.BytesIO()
-                
-                # Plot with SMA200 (Blue) and the Apex Stop Line (Red Dash)
-                ap = [
-                    mpf.make_addplot(hist['SMA200'], color='blue', width=1.5),
-                ]
-                
-                mpf.plot(hist, type='candle', addplot=ap, style='charles', 
-                         volume=True, savefig=buf, tight_layout=True)
+                mpf.plot(hist, type='candle', addplot=[mpf.make_addplot(sma200_plt, color='blue', width=1.2)], style='charles', volume=True, savefig=buf, tight_layout=True, show_nontrading=False)
                 buf.seek(0)
-
-                caption = (
-                    f"<b>🚀 APEX SIGNAL: {t}</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"💰 <b>Last:</b> ${row.Price}\n"
-                    f"📈 <b>SMA200:</b> ${row.SMA200}\n"
-                    f"🛡️ <b>Apex Stop:</b> ${row.Apex_Stop}\n"
-                    f"🔥 <b>Power Score:</b> {row.Power_Score}\n"
-                    f"📊 <b>Vol Surge:</b> {row.Vol_Surge}"
-                )
-                
-                requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", 
-                              files={'photo': (f'{t}.png', buf)}, 
-                              data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
+                caption = (f"<b>{row.Squeeze}: {t}</b>\n━━━━━━━━━━━━━━━━━━━━\n💰 Last: ${row.Price}\n⚔️ Trigger: ${row.Buy_At if row.Buy_At else row.Sell_At}\n🛡️ Stop: ${row.Stop_Loss}\n🏁 Target: ${row.Target}\n📊 Power Score: {row.Power_Score}")
+                requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", files={'photo': (f'{t}.png', buf)}, data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
                 plt.close('all')
-
-        print("✅ Apex Scanner Run Finished.")
+        print("✅ Core Scanner Template Finished.")
     except Exception as e: print(f"FATAL ERROR: {e}")
 
 if __name__ == "__main__":
