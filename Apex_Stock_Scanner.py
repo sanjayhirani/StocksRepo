@@ -21,7 +21,6 @@ def get_russell_1000():
     except: return []
 
 def calculate_rsi(series, period=14):
-    """Standard RSI with Wilder's Smoothing (EMA) as requested"""
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
     loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
@@ -29,7 +28,6 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def run_backtest_on_sheet(sh):
-    """Backtester Component - Integrated into the 'Backtester' Sheet"""
     try:
         ws_bt = sh.worksheet("Backtester")
     except:
@@ -62,11 +60,17 @@ def run_backtest_on_sheet(sh):
         ["Buy & Hold", f"{df['Cum_Hold'].iloc[-1]*100:.2f}%"],
         ["Alpha", f"{(df['Cum_Strategy'].iloc[-1] - df['Cum_Hold'].iloc[-1])*100:.2f}%"]
     ]
+    # Update stats dashboard
     ws_bt.update('D1:E5', stats)
 
+    # Prepare backtest data for upload - removing multi-index issues
     bt_display = df[['Close', 'RSI', 'Signal', 'Cum_Strategy']].tail(100).reset_index()
-    bt_display['Date'] = bt_display['Date'].astype(str)
-    ws_bt.update('A9', [bt_display.columns.tolist()] + bt_display.astype(str).values.tolist())
+    bt_display.columns = ['Date', 'Close', 'RSI', 'Signal', 'Cum_Strategy'] # Explicit headers
+    bt_display['Date'] = bt_display['Date'].dt.strftime('%Y-%m-%d')
+    
+    # Convert to list of strings (following original script's logic)
+    upload_data = [bt_display.columns.tolist()] + bt_display.astype(str).values.tolist()
+    ws_bt.update('A9', upload_data)
 
 def run_scanner():
     try:
@@ -94,7 +98,7 @@ def run_scanner():
 
         results = []
 
-        # 3. APEX LOGIC (Mean Reversion - No SMA Trend Filter)
+        # 3. APEX LOGIC (Target SMA200 / Wilder's RSI)
         for t in tkrs:
             try:
                 if t not in data.columns.levels[0]: continue
@@ -103,28 +107,27 @@ def run_scanner():
                 
                 df.index = pd.to_datetime(df.index)
                 df['RSI'] = calculate_rsi(df['Close'])
-                sma200 = df['Close'].rolling(200).mean().iloc[-1]
+                sma200_val = df['Close'].rolling(200).mean().iloc[-1]
                 atr = (df['High']-df['Low']).rolling(14).mean().iloc[-1]
                 close = float(df['Close'].iloc[-1])
                 
                 rsi_window = df['RSI'].tail(12)
                 setup_type = None
                 
-                # Updated logic: Snap-back to SMA200
                 if rsi_window.min() < 32:
                     setup_type = "LONG"
                     p_score = round((32 - rsi_window.min()) * 5, 2)
                     age = int(len(rsi_window) - rsi_window.argmin() - 1)
                     trigger = round(df['High'].tail(2).max() * 1.005, 2)
                     stop = round(trigger - (atr * 2.5), 2)
-                    target = round(sma200, 2) 
+                    target = round(sma200_val, 2) 
                 elif rsi_window.max() > 68:
                     setup_type = "SHORT"
                     p_score = round((rsi_window.max() - 68) * 5, 2)
                     age = int(len(rsi_window) - rsi_window.argmax() - 1)
                     trigger = round(df['Low'].tail(2).min() * 0.995, 2)
                     stop = round(trigger + (atr * 2.5), 2)
-                    target = round(sma200, 2)
+                    target = round(sma200_val, 2)
 
                 if setup_type and (abs(trigger - stop) / trigger) <= 0.12:
                     vol_surge = df['Volume'].iloc[-1]/df['Volume'].rolling(20).mean().iloc[-1]
@@ -181,7 +184,7 @@ def run_scanner():
                               data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
                 plt.close('all')
 
-        print("✅ Scan Complete. Original plumbing preserved.")
+        print("✅ Scan Complete.")
     except Exception as e: print(f"FATAL ERROR: {e}")
 
 if __name__ == "__main__":
