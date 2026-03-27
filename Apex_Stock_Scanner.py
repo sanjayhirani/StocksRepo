@@ -29,7 +29,7 @@ def calculate_rsi(series, period=14):
 
 def run_scanner():
     try:
-        # 1. SETUP & AUTH
+        # 1. AUTH
         token, chat = os.environ.get('TELEGRAM_BOT_TOKEN'), os.environ.get('TELEGRAM_CHAT_ID')
         creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
         gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]))
@@ -38,7 +38,7 @@ def run_scanner():
         tkrs = get_russell_1000()
         if not tkrs: return
 
-        # 2. DATA DOWNLOAD (Standard Bulk with Cache)
+        # 2. DATA (Russell 1000 is ~1000 tickers + SPY)
         if not os.path.exists(CACHE_DIR): os.makedirs(CACHE_DIR)
         data = yf.download(tkrs + ["SPY"], period="2y", group_by='ticker', progress=False)
         
@@ -49,30 +49,31 @@ def run_scanner():
 
         results = []
 
-        # 3. APEX LOGIC LOOP
+        # 3. APEX LOGIC
         for t in tkrs:
             try:
                 if t not in data.columns.levels[0]: continue
                 df = data[t].dropna().copy()
                 if len(df) < 210: continue
                 
-                # Techs
-                df['RSI'] = calculate_rsi(df['Close'])
-                sma200 = df['Close'].rolling(200).mean().iloc[-1]
-                atr = (df['High']-df['Low']).rolling(14).mean().iloc[-1]
-                close = df['Close'].iloc[-1]
+                # Keep index as DatetimeIndex for mplfinance
+                df.index = pd.to_datetime(df.index)
                 
-                # Scan Window (Last 12 Trading Days)
+                df['RSI'] = calculate_rsi(df['Close'])
+                sma200 = df['Close'].rolling(200).mean()
+                atr = (df['High']-df['Low']).rolling(14).mean().iloc[-1]
+                close = float(df['Close'].iloc[-1])
+                
                 rsi_window = df['RSI'].tail(12)
                 
                 setup_type = None
-                if close > sma200 and rsi_window.min() < 42:
+                if close > sma200.iloc[-1] and rsi_window.min() < 42:
                     setup_type = "LONG"
                     p_score = round((42 - rsi_window.min()) * 5, 2)
                     age = int(len(rsi_window) - rsi_window.argmin() - 1)
                     trigger = round(df['High'].tail(2).max() * 1.005, 2)
                     stop = round(trigger - (atr * 2.5), 2)
-                elif close < sma200 and rsi_window.max() > 58:
+                elif close < sma200.iloc[-1] and rsi_window.max() > 58:
                     setup_type = "SHORT"
                     p_score = round((rsi_window.max() - 58) * 5, 2)
                     age = int(len(rsi_window) - rsi_window.argmax() - 1)
@@ -80,15 +81,18 @@ def run_scanner():
                     stop = round(trigger + (atr * 2.5), 2)
 
                 if setup_type and (abs(trigger - stop) / trigger) <= 0.12:
+                    # Quick Market Cap approximation to save time
+                    vol_surge = df['Volume'].iloc[-1]/df['Volume'].rolling(20).mean().iloc[-1]
                     results.append({
                         'Stock': t, 'Squeeze': f"{setup_type} (Age:{age}d)", 'Power_Score': p_score,
-                        'Vol_Surge': f"{df['Volume'].iloc[-1]/df['Volume'].rolling(20).mean().iloc[-1]:.2f}x",
+                        'Vol_Surge': f"{vol_surge:.2f}x",
                         'Buy_At': trigger if setup_type == "LONG" else "",
                         'Sell_At': trigger if setup_type == "SHORT" else "",
                         'Stop_Loss': stop, 'Price': round(close, 2),
-                        'Mkt_Cap': f"{close * 1e6 / 1e9:.1f}B", # Estimated based on scale
+                        'Mkt_Cap': "N/A", # Removed slow fetch
                         'YTD': round(((close/df['Close'].iloc[0])-1)*100, 1),
-                        'df_ptr': df
+                        'df_ptr': df,
+                        'sma200_ser': sma200
                     })
             except: continue
 
@@ -98,19 +102,22 @@ def run_scanner():
             ws = sh.worksheet(sn)
             ws.clear()
             limit = 5 if sn == "Summary" else 50
-            out = df_full.head(limit).drop(columns=['df_ptr'])
+            out = df_full.head(limit).drop(columns=['df_ptr', 'sma200_ser'])
             ws.update([out.columns.tolist()] + out.astype(str).values.tolist())
 
-        # 5. CHARTING (Gap Fixed by Explicit X-Axis Slice)
+        # 5. TELEGRAM (No-Gap Charting)
         for _, row in df_full.head(5).iterrows():
-            t, hist = row.Stock, row['df_ptr'].tail(100).copy()
-            # Force the chart to only see the last 100 days (kills the white gap)
-            hist.index = hist.index.strftime('%Y-%m-%d') 
+            t = row.Stock
+            # Slice last 100 days for visual clarity
+            hist = row['df_ptr'].tail(100)
+            sma200_slice = row['sma200_ser'].tail(100)
             
-            sma200_plt = row['df_ptr']['Close'].rolling(200).mean().tail(100)
             buf = io.BytesIO()
-            mpf.plot(hist, type='candle', addplot=[mpf.make_addplot(sma200_plt.values, color='blue')], 
-                     style='charles', savefig=buf, tight_layout=True, datetime_format='%Y-%m-%d')
+            # show_nontrading=False removes the weekend gaps without breaking the index
+            mpf.plot(hist, type='candle', 
+                     addplot=[mpf.make_addplot(sma200_slice, color='blue', width=1.2)], 
+                     style='charles', volume=True, savefig=buf, 
+                     tight_layout=True, show_nontrading=False)
             buf.seek(0)
 
             caption = (f"<b>{row.Squeeze}: {t}</b>\n━━━━━━━━━━━━━━━━━━━━\n"
@@ -124,7 +131,7 @@ def run_scanner():
                           data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
             plt.close('all')
 
-        print("✅ Scan Complete.")
+        print("✅ Scan Complete. Charts and Sheets updated.")
     except Exception as e: print(f"FATAL ERROR: {e}")
 
 if __name__ == "__main__":
