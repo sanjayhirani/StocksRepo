@@ -10,7 +10,7 @@ import mplfinance as mpf
 import matplotlib.pyplot as plt
 
 CACHE_DIR = "data_cache"
-CACHE_FILE = os.path.join(CACHE_DIR, "sp500_apex_v2.pkl")
+CACHE_FILE = os.path.join(CACHE_DIR, "sp500_apex_v3.pkl")
 
 def get_sp500_tickers():
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
@@ -28,26 +28,33 @@ def calculate_rsi(series, period=14):
     rs = gain / (loss + 1e-9)
     return 100 - (100 / (1 + rs))
 
-def format_sheets(sh, worksheet_name):
-    """Applies Black/White styling and professional formatting."""
-    ws = sh.worksheet(worksheet_name)
-    fmt = cellFormat(
+def apply_pro_formatting(sh, ws_name, row_count, col_count):
+    """Applies Black/White Professional Styling."""
+    ws = sh.worksheet(ws_name)
+    # Header: Black Background, White Bold Text
+    header_fmt = cellFormat(
         backgroundColor=color(0, 0, 0),
         textFormat=textFormat(bold=True, foregroundColor=color(1, 1, 1)),
         horizontalAlignment='CENTER'
     )
-    format_cell_range(ws, 'A1:J1', fmt)
-    set_column_width(ws, 'A:J', 120)
-    # Alternating row colors (Light Grey)
+    format_cell_range(ws, 'A1:J1', header_fmt)
+    
+    # Grid and Alignment
+    body_fmt = cellFormat(horizontalAlignment='CENTER', verticalAlignment='MIDDLE')
+    format_cell_range(ws, f'A2:J{row_count+1}', body_fmt)
+    
+    # Alternating Row Colors
     rule = ConditionalFormatRule(
-        ranges=[GridRange.from_a1_range('A2:J100', ws)],
-        booleanRule=BooleanRule(condition=BooleanCondition('CUSTOM_FORMULA', ['=ISODD(ROW())']), format=cellFormat(backgroundColor=color(0.95, 0.95, 0.95)))
+        ranges=[GridRange.from_a1_range(f'A2:J{row_count+1}', ws)],
+        booleanRule=BooleanRule(
+            condition=BooleanCondition('CUSTOM_FORMULA', ['=ISODD(ROW())']),
+            format=cellFormat(backgroundColor=color(0.96, 0.96, 0.96))
+        )
     )
     get_conditional_format_rules(ws).append(rule)
     get_conditional_format_rules(ws).save()
 
 def run_scanner():
-    """S&P 500 APEX - SMA-FREE PIVOT ENGINE"""
     try:
         token = os.environ.get('TELEGRAM_BOT_TOKEN')
         chat = os.environ.get('TELEGRAM_CHAT_ID')
@@ -59,81 +66,78 @@ def run_scanner():
         tkrs = [x[0] for x in ticker_data]
         sector_map = {x[0]: x[1] for x in ticker_data}
 
-        # 1. Market Baseline (Hourly Alpha)
+        # 1. Market Alpha Baseline (1h Interval)
         spy_h = yf.download("SPY", period="2d", interval="1h", progress=False)
-        spy_4h_change = (spy_h['Close'].iloc[-1] / spy_h['Close'].iloc[-5]) - 1
+        spy_change = (spy_h['Close'].iloc[-1] / spy_h['Close'].iloc[-5]) - 1
 
-        # 2. Daily Data (Cached)
+        # 2. Data Pull (Daily)
         if not os.path.exists(CACHE_DIR): os.makedirs(CACHE_DIR)
         data = yf.download(tkrs, period="1y", group_by='ticker', progress=False)
-        if data is not None and not data.empty: data.to_pickle(CACHE_FILE)
-        elif os.path.exists(CACHE_FILE): data = pd.read_pickle(CACHE_FILE)
+        data.to_pickle(CACHE_FILE)
 
         results = []
         for t in tkrs:
             try:
                 df = data[t].dropna().copy()
-                if len(df) < 50: continue
+                if len(df) < 60: continue
                 
-                # Pivot Logic: 3-Day High/Low
-                three_day_h = df['High'].tail(3).max()
-                three_day_l = df['Low'].tail(3).min()
+                # 3-Day Pivot
+                t_high, t_low = df['High'].tail(3).max(), df['Low'].tail(3).min()
                 
-                # Fresh Alpha pull
+                # Intraday Alpha Check
                 df_h = yf.download(t, period="2d", interval="1h", progress=False)
-                alpha = (df_h['Close'].iloc[-1] / df_h['Close'].iloc[-5] - 1) - spy_4h_change
+                alpha = ((df_h['Close'].iloc[-1] / df_h['Close'].iloc[-5]) - 1) - spy_change
                 
                 df['RSI'] = calculate_rsi(df['Close'])
                 df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
-                close, atr, rsi_now = float(df['Close'].iloc[-1]), df['ATR'].iloc[-1], df['RSI'].iloc[-1]
+                close, rsi_now, atr = df['Close'].iloc[-1], df['RSI'].iloc[-1], df['ATR'].iloc[-1]
 
-                setup_type, conviction = None, 0
-                
-                # SMA-FREE LONG: Price breaks 3-day high + Oversold + Positive Alpha
-                if rsi_now < 40 and close >= three_day_h and alpha > 0.005:
-                    setup_type = "LONG 🚀"
-                    conviction = ((40 - rsi_now) * 5) + (alpha * 2000)
-                    trigger, stop = three_day_h, close - (atr * 2)
-                    target = close + (abs(close - stop) * 2)
-                
-                # SMA-FREE SHORT: Price breaks 3-day low + Overbought + Negative Alpha
-                elif rsi_now > 55 and close <= three_day_l and alpha < -0.005:
-                    setup_type = "SHORT 📉"
-                    conviction = ((rsi_now - 50) * 5) + (abs(alpha) * 2000)
-                    trigger, stop = three_day_l, close + (atr * 2)
-                    target = close - (abs(stop - close) * 2)
+                setup = None
+                if rsi_now < 42 and close >= t_high and alpha > 0.004:
+                    setup, icon = "LONG", "🚀"
+                    score = ((42 - rsi_now) * 4) + (alpha * 2500)
+                    trig, stop = t_high, close - (atr * 2)
+                elif rsi_now > 52 and close <= t_low and alpha < -0.004:
+                    setup, icon = "SHORT", "📉"
+                    score = ((rsi_now - 52) * 4) + (abs(alpha) * 2500)
+                    trig, stop = t_low, close + (atr * 2)
 
-                if setup_type:
+                if setup:
                     results.append({
-                        'Stock': t, 'Sector': sector_map.get(t, "N/A"),
-                        'Setup': setup_type, 'Alpha_1h': f"{alpha*100:+.2f}%",
-                        'Conviction': round(conviction, 2), 'Price': round(close, 2),
-                        'Trigger': round(trigger, 2), 'Stop': round(stop, 2), 'Target': round(target, 2),
+                        'Stock': t, 'Sector': sector_map.get(t, "N/A"), 'Type': icon + " " + setup,
+                        'Alpha_1h': f"{alpha*100:+.2f}%", 'Conviction': round(score, 2),
+                        'Price': round(close, 2), 'Trigger': round(trig, 2), 
+                        'Stop': round(stop, 2), 'Target': round(close + (close-stop)*2 if setup=="LONG" else close - (stop-close)*2, 2),
                         'df_ptr': df
                     })
             except: continue
 
         df_full = pd.DataFrame(results)
         if not df_full.empty:
+            # Sector Sentiment Analysis
+            sentiment = df_full.groupby('Sector')['Type'].value_counts().unstack().fillna(0)
+            sentiment['Bias'] = sentiment.apply(lambda x: "BULLISH" if x.get('🚀 LONG', 0) > x.get('📉 SHORT', 0) else "BEARISH", axis=1)
+            
             df_summary = df_full.sort_values('Conviction', ascending=False).head(5)
             df_core = df_full.sort_values(['Sector', 'Conviction'], ascending=[True, False])
 
             for sn in ["Summary", "Core Screener"]:
                 ws = sh.worksheet(sn); ws.clear()
                 source_df = df_summary if sn == "Summary" else df_core
-                final_cols = source_df[['Stock', 'Sector', 'Setup', 'Alpha_1h', 'Conviction', 'Price', 'Trigger', 'Stop', 'Target']]
-                ws.update([final_cols.columns.tolist()] + final_cols.astype(str).values.tolist())
-                format_sheets(sh, sn)
+                cols = ['Stock', 'Sector', 'Type', 'Alpha_1h', 'Conviction', 'Price', 'Trigger', 'Stop', 'Target']
+                final = source_df[cols]
+                ws.update([final.columns.tolist()] + final.astype(str).values.tolist())
+                apply_pro_formatting(sh, sn, len(final), len(cols))
 
-            # Telegram Alerts
+            # Telegram Top 5
             for _, row in df_summary.iterrows():
                 buf = io.BytesIO()
-                mpf.plot(row['df_ptr'].tail(60), type='candle', style='charles', savefig=buf)
+                mpf.plot(row['df_ptr'].tail(50), type='candle', style='charles', savefig=buf)
                 buf.seek(0)
-                caption = (f"<b>{row.Setup} | {row.Stock} ({row.Sector})</b>\n"
-                           f"Alpha: {row.Alpha_1h} | Conviction: {row.Conviction}\n━━━━━━━━━━━━━━━━━━━━\n"
-                           f"⚔️ Trigger: ${row.Trigger}\n🛡️ Stop: ${row.Stop}\n💰 Target: ${row.Target}")
-                requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", files={'photo': (f'{row.Stock}.png', buf)}, data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
+                caption = (f"<b>{row.Type} | {row.Stock} ({row.Sector})</b>\n"
+                           f"Alpha: {row.Alpha_1h} | Score: {row.Conviction}\n"
+                           f"⚔️ Trigger: ${row.Trigger}\n🛡️ Stop: ${row.Stop}")
+                requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", files={'photo': (f'{t}.png', buf)}, data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
                 plt.close('all')
 
     except Exception as e: print(f"Error: {e}")
