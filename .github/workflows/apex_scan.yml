@@ -30,8 +30,7 @@ jobs:
       - name: Install Python Dependencies
         run: |
           pip install --upgrade pip
-          pip install yfinance pandas numpy gspread oauth2client \
-                      requests lxml mplfinance matplotlib
+          pip install yfinance pandas gspread oauth2client mplfinance matplotlib gspread-formatting
 
       - name: Run Apex Scanner
         env:
