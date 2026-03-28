@@ -28,18 +28,16 @@ def calculate_rsi(series, period=14):
     rs = gain / (loss + 1e-9)
     return 100 - (100 / (1 + rs))
 
-def apply_pro_styling(sh, ws_name, row_count, col_count):
-    """Applies Black Fill / White Text to headers."""
+def apply_formatting(sh, ws_name, row_count):
+    """Adds the Black/White header styling."""
     ws = sh.worksheet(ws_name)
-    last_col = chr(64 + col_count)
     header_fmt = cellFormat(
         backgroundColor=color(0, 0, 0),
         textFormat=textFormat(bold=True, foregroundColor=color(1, 1, 1)),
         horizontalAlignment='CENTER'
     )
-    format_cell_range(ws, f'A1:{last_col}1', header_fmt)
-    format_cell_range(ws, f'A2:{last_col}{row_count+1}', cellFormat(horizontalAlignment='CENTER'))
-    set_column_width(ws, 'A:J', 115)
+    format_cell_range(ws, 'A1:J1', header_fmt)
+    format_cell_range(ws, f'A2:J{row_count+1}', cellFormat(horizontalAlignment='CENTER'))
 
 def run_scanner():
     try:
@@ -49,87 +47,100 @@ def run_scanner():
         sh = gc.open("Stock Scanner")
 
         ticker_data = get_sp500_tickers()
+        if not ticker_data: return
         tkrs = [x[0] for x in ticker_data]
         sector_map = {x[0]: x[1] for x in ticker_data}
 
-        # Alpha Baseline (Hourly SPY)
+        # Alpha Baseline
         spy_h = yf.download("SPY", period="2d", interval="1h", progress=False)
-        spy_chg = (spy_h['Close'].iloc[-1] / spy_h['Close'].iloc[-5]) - 1 if not spy_h.empty else 0
+        spy_change = (spy_h['Close'].iloc[-1] / spy_h['Close'].iloc[-5]) - 1 if not spy_h.empty else 0
 
-        # Data collection
-        data = yf.download(tkrs, period="1y", group_by='ticker', progress=False)
-        if data.empty: return
+        if not os.path.exists(CACHE_DIR): os.makedirs(CACHE_DIR)
+        data = yf.download(tkrs + ["SPY"], period="2y", group_by='ticker', progress=False)
+        
+        if (data is None or data.empty) and os.path.exists(CACHE_FILE):
+            data = pd.read_pickle(CACHE_FILE)
+        elif data is not None and not data.empty:
+            data.to_pickle(CACHE_FILE)
+        else: return
 
         results = []
         for t in tkrs:
             try:
+                if t not in data.columns.levels[0]: continue
                 df = data[t].dropna().copy()
                 if len(df) < 50: continue
                 
-                # FIX: Compare current price to PREVIOUS 3 days (offset by 1)
-                # This ensures today's price can actually "break out" of the range
-                prev_3d_high = df['High'].iloc[-4:-1].max()
-                prev_3d_low = df['Low'].iloc[-4:-1].min()
-                
-                stock_chg = (df['Close'].iloc[-1] / df['Close'].iloc[-5]) - 1
-                alpha = stock_chg - spy_chg
-                
-                vol_avg = df['Volume'].rolling(20).mean().iloc[-1]
-                vol_surge = df['Volume'].iloc[-1] / vol_avg
-                
+                df.index = pd.to_datetime(df.index); df = df.sort_index()
                 df['RSI'] = calculate_rsi(df['Close'])
                 df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
-                close, rsi, atr = df['Close'].iloc[-1], df['RSI'].iloc[-1], df['ATR'].iloc[-1]
-
-                setup, score = None, 0
-
-                # LONG: Breaking out of previous 3-day range with Alpha (VLO/MPC)
-                if close > prev_3d_high and alpha > 0.004:
-                    setup = "LONG 🚀"
-                    score = round((alpha * 5000) + (rsi * 0.1) + (vol_surge * 10), 2)
-                    trig, stop = prev_3d_high, close - (atr * 2)
                 
-                # SHORT: Breaking below previous 3-day range with Alpha (NKE/BSX)
-                elif close < prev_3d_low and alpha < -0.004:
-                    setup = "SHORT 📉"
-                    score = round((abs(alpha) * 5000) + ((100-rsi) * 0.1) + (vol_surge * 10), 2)
-                    trig, stop = prev_3d_low, close + (atr * 2)
+                # Logic Fix: Compare against previous 3 days (offset current day)
+                t_high = df['High'].iloc[-4:-1].max()
+                t_low = df['Low'].iloc[-4:-1].min()
+                
+                close, atr = float(df['Close'].iloc[-1]), df['ATR'].iloc[-1]
+                rsi_window = df['RSI'].tail(12)
+                
+                # Alpha Calc
+                stock_change = (close / df['Close'].iloc[-5]) - 1
+                alpha = stock_change - spy_change
+                
+                setup_type, trigger, stop, target, p_score, age = None, 0, 0, 0, 0, 0
 
-                if setup:
+                # NEW LONG: Pivot Break + Alpha (Replaces SMA200 filter)
+                if close > t_high and alpha > 0.005:
+                    setup_type = "LONG"
+                    p_score = round((alpha * 4000) + (df['RSI'].iloc[-1] * 0.2), 2)
+                    age = int(len(rsi_window) - rsi_window.values.argmin() - 1)
+                    trigger = t_high
+                    stop = round(close - (atr * 2), 2)
+                    target = round(close + (abs(close - stop) * 2.5), 2)
+                
+                # NEW SHORT: Pivot Breakdown + Alpha
+                elif close < t_low and alpha < -0.005:
+                    setup_type = "SHORT"
+                    p_score = round((abs(alpha) * 4000) + ((100 - df['RSI'].iloc[-1]) * 0.2), 2)
+                    age = int(len(rsi_window) - rsi_window.values.argmax() - 1)
+                    trigger = t_low
+                    stop = round(close + (atr * 2), 2)
+                    target = round(close - (abs(stop - close) * 2.5), 2)
+
+                if setup_type:
+                    vol_surge = df['Volume'].iloc[-1] / df['Volume'].rolling(20).mean().iloc[-1]
                     results.append({
-                        'Stock': t, 'Sector': sector_map.get(t, "N/A"), 'Type': setup,
-                        'Alpha': f"{alpha*100:+.2f}%", 'Vol': f"{vol_surge:.1f}x", 'Score': score,
-                        'Price': round(close, 2), 'Trigger': round(trig, 2), 'Stop': round(stop, 2),
-                        'Target': round(close + (close-stop)*2.5 if "LONG" in setup else close - (stop-close)*2.5, 2),
-                        'df_ptr': df
+                        'Stock': t, 'Sector': sector_map.get(t, "N/A"),
+                        'Setup': f"{setup_type} (Age:{age}d)", 'Alpha': f"{alpha*100:+.2f}%",
+                        'Power_Score': p_score, 'Vol_Surge': f"{vol_surge:.2f}x", 
+                        'Trigger': trigger, 'Stop_Loss': stop, 'Target': target, 'Price': round(close, 2),
+                        'Age_Val': age, 'df_ptr': df
                     })
             except: continue
 
         df_full = pd.DataFrame(results)
         if not df_full.empty:
-            df_full = df_full.sort_values('Score', ascending=False)
-            df_summary = df_full.head(5)
-
+            df_summary = df_full.sort_values(by='Power_Score', ascending=False).head(5)
+            df_core = df_full.sort_values(by='Power_Score', ascending=False)
+            
             for sn in ["Summary", "Core Screener"]:
                 ws = sh.worksheet(sn); ws.clear()
-                source = df_summary if sn == "Summary" else df_full
-                final = source.drop(columns=['df_ptr'])
-                ws.update([final.columns.tolist()] + final.astype(str).values.tolist())
-                apply_pro_styling(sh, sn, len(final), len(final.columns))
+                source_df = df_summary if sn == "Summary" else df_core
+                final_cols = source_df.drop(columns=['df_ptr', 'Age_Val'])
+                ws.update([final_cols.columns.tolist()] + final_cols.astype(str).values.tolist())
+                apply_formatting(sh, sn, len(final_cols))
 
             for _, row in df_summary.iterrows():
                 buf = io.BytesIO()
                 mpf.plot(row['df_ptr'].tail(50), type='candle', style='charles', savefig=buf)
                 buf.seek(0)
-                caption = (f"<b>{row.Type} | {row.Stock}</b>\nAlpha: {row.Alpha} | Vol: {row.Vol}\n"
-                           f"Score: {row.Score}\n━━━━━━━━━━━━━━━━━━━━\n"
-                           f"⚔️ Trig: ${row.Trigger} | 🛡️ Stop: ${row.Stop}")
-                requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", 
-                              files={'photo': (f'{row.Stock}.png', buf)}, 
-                              data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
+                icon = "🚀" if "LONG" in row.Setup else "📉"
+                caption = (f"<b>{icon} {row.Stock} ({row.Sector})</b>\n"
+                           f"Alpha: {row.Alpha} | Score: {row.Power_Score}\n"
+                           f"⚔️ Trigger: ${row.Trigger} | 🛡️ Stop: ${row.Stop_Loss}")
+                requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", files={'photo': (f'{row.Stock}.png', buf)}, data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
                 plt.close('all')
-
-        print(f"✅ Apex Complete. Found {len(df_full)} High-Conviction pivots.")
+                
+        print(f"✅ Apex Complete. Found {len(df_full)} results.")
     except Exception as e: print(f"FATAL ERROR: {e}")
 
 if __name__ == "__main__":
