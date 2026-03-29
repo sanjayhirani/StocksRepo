@@ -33,23 +33,20 @@ def apply_pro_formatting(ws, df, is_journal=False):
     rows = len(df) + 1
     last_col_letter = gspread.utils.rowcol_to_a1(1, cols).replace("1", "")
     
-    # 1. Header Styling (Black background, White bold text)
     ws.format(f"A1:{last_col_letter}1", {
         "backgroundColor": {"red": 0.1, "green": 0.1, "blue": 0.1},
         "horizontalAlignment": "CENTER",
         "textFormat": {"foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}, "bold": True, "fontSize": 10}
     })
     
-    # 2. Alternating Row Banding (Light Gray)
     if rows > 1:
         ws.format(f"A2:{last_col_letter}{rows}", {
             "textFormat": {"foregroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2}, "fontSize": 9},
             "verticalAlignment": "MIDDLE"
         })
 
-    # 3. Conditional Formatting for Journal
     if is_journal and rows > 1:
-        # Status Column (Assume H is Status)
+        # Status Column Logic (G)
         ws.conditional_format_rule(f"G2:G{rows}", {
             "type": "TEXT_CONTAINS", "values": [{"userEnteredValue": "TARGET HIT"}],
             "style": {"backgroundColor": {"red": 0.8, "green": 1.0, "blue": 0.8}, "textFormat": {"foregroundColor": {"red": 0.0, "green": 0.5, "blue": 0.0}, "bold": True}}
@@ -58,7 +55,7 @@ def apply_pro_formatting(ws, df, is_journal=False):
             "type": "TEXT_CONTAINS", "values": [{"userEnteredValue": "STOPPED OUT"}],
             "style": {"backgroundColor": {"red": 1.0, "green": 0.8, "blue": 0.8}, "textFormat": {"foregroundColor": {"red": 0.7, "green": 0.0, "blue": 0.0}, "bold": True}}
         })
-        # P/L Column (Assume I is PL_Pct)
+        # P/L Column Logic (I)
         ws.conditional_format_rule(f"I2:I{rows}", {
             "type": "NUMBER_GREATER", "values": [{"userEnteredValue": "0"}],
             "style": {"textFormat": {"foregroundColor": {"red": 0.0, "green": 0.6, "blue": 0.0}, "bold": True}}
@@ -133,24 +130,33 @@ def run_scanner():
                 try: ws_j = sh.worksheet("Trade Journal")
                 except: ws_j = sh.add_worksheet(title="Trade Journal", rows="1000", cols="20")
                 
-                raw_j = ws_j.get_values("A1:I100") # Get specifically the table area to avoid dashboard duplicates
+                raw_j = ws_j.get_values("A1:I500") 
                 df_j = pd.DataFrame(raw_j[1:], columns=raw_j[0]) if len(raw_j) > 1 else pd.DataFrame(columns=['Stock', 'Date', 'Dir', 'Entry', 'Stop', 'Target', 'Status', 'Price_Now', 'PL_Pct'])
 
                 for idx, row in df_j.iterrows():
                     if row['Status'] in ['ACTIVE', 'PENDING']:
                         hist = yf.download(row['Stock'], period="5d", progress=False)
                         if not hist.empty:
-                            curr, low, high = float(hist['Close'].iloc[-1]), hist['Low'].min(), hist['High'].max()
+                            curr = float(hist['Close'].iloc[-1].iloc[0]) if isinstance(hist['Close'].iloc[-1], pd.Series) else float(hist['Close'].iloc[-1])
+                            low = float(hist['Low'].min().iloc[0]) if isinstance(hist['Low'].min(), pd.Series) else float(hist['Low'].min())
+                            high = float(hist['High'].max().iloc[0]) if isinstance(hist['High'].max(), pd.Series) else float(hist['High'].max())
+                            
                             ent, stp, tgt = float(row['Entry']), float(row['Stop']), float(row['Target'])
+                            
                             if row['Status'] == 'PENDING':
-                                if (row['Dir'] == 'LONG' and high >= ent) or (row['Dir'] == 'SHORT' and low <= ent): df_j.at[idx, 'Status'] = 'ACTIVE'
+                                if (row['Dir'] == 'LONG' and high >= ent) or (row['Dir'] == 'SHORT' and low <= ent): 
+                                    df_j.at[idx, 'Status'] = 'ACTIVE'
+                            
                             if df_j.at[idx, 'Status'] == 'ACTIVE':
                                 if (row['Dir'] == 'LONG' and low <= stp) or (row['Dir'] == 'SHORT' and high >= stp): 
                                     df_j.at[idx, 'Status'], df_j.at[idx, 'Price_Now'] = 'STOPPED OUT', stp
                                 elif (row['Dir'] == 'LONG' and high >= tgt) or (row['Dir'] == 'SHORT' and low <= tgt): 
                                     df_j.at[idx, 'Status'], df_j.at[idx, 'Price_Now'] = 'TARGET HIT', tgt
-                                else: df_j.at[idx, 'Price_Now'] = round(curr, 2)
-                                df_j.at[idx, 'PL_Pct'] = round(((float(df_j.at[idx, 'Price_Now']) - ent)/ent*100) if row['Dir']=='LONG' else ((ent - float(df_j.at[idx, 'Price_Now']))/ent*100), 2)
+                                else: 
+                                    df_j.at[idx, 'Price_Now'] = round(curr, 2)
+                                
+                                exit_val = float(df_j.at[idx, 'Price_Now'])
+                                df_j.at[idx, 'PL_Pct'] = round(((exit_val - ent)/ent*100) if row['Dir']=='LONG' else ((ent - exit_val)/ent*100), 2)
 
                 if not df_summary.empty:
                     top = df_summary.iloc[0]
@@ -161,7 +167,7 @@ def run_scanner():
                 ws_j.update([df_j.columns.tolist()] + df_j.astype(str).values.tolist())
                 apply_pro_formatting(ws_j, df_j, is_journal=True)
 
-                # Dashboard 
+                # Performance Dashboard (K1:L4)
                 w, l, p = len(df_j[df_j['Status']=='TARGET HIT']), len(df_j[df_j['Status']=='STOPPED OUT']), len(df_j[df_j['Status']=='PENDING'])
                 ws_j.update("K1:L4", [["PERFORMANCE", ""], ["Wins ✅", w], ["Losses ❌", l], ["Pending ⏳", p]])
                 ws_j.format("K1:L1", {"backgroundColor": {"red": 0.0, "green": 0.3, "blue": 0.6}, "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True}})
