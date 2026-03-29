@@ -28,8 +28,17 @@ def calculate_rsi(series, period=14):
     rs = gain / (loss + 1e-9)
     return 100 - (100 / (1 + rs))
 
+def format_headers(ws, col_count):
+    """Applies black background and white bold text to the first row."""
+    header_range = f'A1:{gspread.utils.rowcol_to_a1(1, col_count)}'
+    ws.format(header_range, {
+        "backgroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0},
+        "horizontalAlignment": "CENTER",
+        "textFormat": {"foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}, "bold": True}
+    })
+
 def run_scanner():
-    """S&P 500 APEX SCANNER - FULL 500 + SECTORS + TRADE JOURNAL"""
+    """S&P 500 APEX SCANNER - FULL 500 + SECTORS + FORMATTED TRADE JOURNAL"""
     try:
         token, chat = os.environ.get('TELEGRAM_BOT_TOKEN'), os.environ.get('TELEGRAM_CHAT_ID')
         creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
@@ -104,73 +113,64 @@ def run_scanner():
         if not df_full.empty:
             df_summary = df_full[(df_full['Age_Val'] >= 2) & (df_full['Age_Val'] <= 5)].copy()
             df_summary = df_summary.sort_values(by=['Power_Score', 'Dist_To_Trigger'], ascending=[False, True]).head(5)
-
             df_core = df_full.sort_values(by=['Dist_To_Trigger', 'Power_Score'], ascending=[True, False])
             
+            # --- UPDATE SHEETS: SUMMARY & CORE ---
             for sn in ["Summary", "Core Screener"]:
                 ws = sh.worksheet(sn); ws.clear()
                 source_df = df_summary if sn == "Summary" else df_core
                 final_cols = source_df.drop(columns=['df_ptr', 'sma200_val', 'Dist_To_Trigger', 'Age_Val', 'Type'])
                 ws.update([final_cols.columns.tolist()] + final_cols.astype(str).values.tolist())
+                format_headers(ws, len(final_cols.columns))
 
-            # --- START TRADE JOURNAL LOGIC ---
+            # --- TRADE JOURNAL LOGIC ---
             try:
-                try:
-                    ws_j = sh.worksheet("Trade Journal")
-                except:
-                    ws_j = sh.add_worksheet(title="Trade Journal", rows="1000", cols="20")
+                try: ws_j = sh.worksheet("Trade Journal")
+                except: ws_j = sh.add_worksheet(title="Trade Journal", rows="1000", cols="20")
                 
                 existing_data = ws_j.get_all_records()
-                df_j = pd.DataFrame(existing_data) if existing_data else pd.DataFrame(columns=['Stock', 'Date', 'Type', 'Trigger', 'Stop', 'Target', 'Status', 'Current_Price'])
+                df_j = pd.DataFrame(existing_data) if existing_data else pd.DataFrame(columns=['Stock', 'Date', 'Type', 'Trigger', 'Stop', 'Target', 'Status', 'Price_Now', 'PL_Pct'])
 
-                # Update Existing Trades
                 for idx, row in df_j.iterrows():
                     if row['Status'] in ['ACTIVE', 'PENDING']:
-                        t_ticker = row['Stock']
-                        hist = yf.download(t_ticker, period="5d", progress=False)
+                        hist = yf.download(row['Stock'], period="5d", progress=False)
                         if not hist.empty:
-                            curr_close = hist['Close'].iloc[-1]
-                            week_low = hist['Low'].min()
-                            week_high = hist['High'].max()
-                            
-                            # Check Trigger
+                            curr_close, w_low, w_high = hist['Close'].iloc[-1], hist['Low'].min(), hist['High'].max()
                             if row['Status'] == 'PENDING':
-                                if (row['Type'] == 'LONG' and week_high >= row['Trigger']) or (row['Type'] == 'SHORT' and week_low <= row['Trigger']):
+                                if (row['Type'] == 'LONG' and w_high >= row['Trigger']) or (row['Type'] == 'SHORT' and w_low <= row['Trigger']):
                                     df_j.at[idx, 'Status'] = 'ACTIVE'
-                            
-                            # Check Exit
                             if df_j.at[idx, 'Status'] == 'ACTIVE':
-                                if (row['Type'] == 'LONG' and week_low <= row['Stop']) or (row['Type'] == 'SHORT' and week_high >= row['Stop']):
-                                    df_j.at[idx, 'Status'] = 'STOPPED OUT'
-                                elif (row['Type'] == 'LONG' and week_high >= row['Target']) or (row['Type'] == 'SHORT' and week_low <= row['Target']):
-                                    df_j.at[idx, 'Status'] = 'TARGET HIT'
-                            
-                            df_j.at[idx, 'Current_Price'] = round(float(curr_close), 2)
+                                if (row['Type'] == 'LONG' and w_low <= row['Stop']) or (row['Type'] == 'SHORT' and w_high >= row['Stop']):
+                                    df_j.at[idx, 'Status'], df_j.at[idx, 'Price_Now'] = 'STOPPED OUT', row['Stop']
+                                elif (row['Type'] == 'LONG' and w_high >= row['Target']) or (row['Type'] == 'SHORT' and w_low <= row['Target']):
+                                    df_j.at[idx, 'Status'], df_j.at[idx, 'Price_Now'] = 'TARGET HIT', row['Target']
+                                else:
+                                    df_j.at[idx, 'Price_Now'] = round(float(curr_close), 2)
+                                
+                                # Calculate % Return
+                                entry = row['Trigger']
+                                exit_p = df_j.at[idx, 'Price_Now']
+                                df_j.at[idx, 'PL_Pct'] = round(((exit_p - entry) / entry * 100) if row['Type'] == 'LONG' else ((entry - exit_p) / entry * 100), 2)
 
-                # Add New #1 Trade
                 if not df_summary.empty:
-                    top_trade = df_summary.iloc[0]
-                    new_row = {
-                        'Stock': top_trade['Stock'], 'Date': datetime.now().strftime("%Y-%m-%d"),
-                        'Type': top_trade['Type'], 'Trigger': top_trade['Buy_At'] if top_trade['Type'] == "LONG" else top_trade['Sell_At'],
-                        'Stop': top_trade['Stop_Loss'], 'Target': top_trade['Target'], 
-                        'Status': 'PENDING', 'Current_Price': top_trade['Price']
-                    }
+                    top = df_summary.iloc[0]
+                    new_row = {'Stock': top['Stock'], 'Date': datetime.now().strftime("%Y-%m-%d"), 'Type': top['Type'], 
+                               'Trigger': top['Buy_At'] if top['Type'] == "LONG" else top['Sell_At'],
+                               'Stop': top['Stop_Loss'], 'Target': top['Target'], 'Status': 'PENDING', 'Price_Now': top['Price'], 'PL_Pct': 0.0}
                     df_j = pd.concat([df_j, pd.DataFrame([new_row])], ignore_index=True)
 
-                # Dashboard Calculation
-                wins = len(df_j[df_j['Status'] == 'TARGET HIT'])
-                losses = len(df_j[df_j['Status'] == 'STOPPED OUT'])
-                not_taken = len(df_j[df_j['Status'] == 'PENDING'])
-                
-                dash = [["DASHBOARD", ""], ["Wins", wins], ["Losses", losses], ["Pending", not_taken]]
-                
                 ws_j.clear()
-                ws_j.update("L1", dash) # Places Dashboard in Top Right (Column L)
                 ws_j.update([df_j.columns.tolist()] + df_j.astype(str).values.tolist())
-            except Exception as je: print(f"Journal Error: {je}")
-            # --- END TRADE JOURNAL LOGIC ---
+                format_headers(ws_j, len(df_j.columns))
 
+                # Dashboard (Visual Style)
+                w, l, p = len(df_j[df_j['Status']=='TARGET HIT']), len(df_j[df_j['Status']=='STOPPED OUT']), len(df_j[df_j['Status']=='PENDING'])
+                dash_data = [["PERFORMANCE DASHBOARD", ""], ["Wins ✅", w], ["Losses ❌", l], ["Pending ⏳", p]]
+                ws_j.update("L1:M4", dash_data)
+                ws_j.format("L1:M1", {"backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2}, "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True}})
+            except Exception as je: print(f"Journal Error: {je}")
+
+            # --- TELEGRAM ALERTS ---
             for _, row in df_summary.iterrows():
                 t, hist, sma200_plt = row.Stock, row['df_ptr'].tail(100), row['sma200_val'].tail(100)
                 buf = io.BytesIO()
@@ -186,7 +186,7 @@ def run_scanner():
                 requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", files={'photo': (f'{t}.png', buf)}, data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
                 plt.close('all')
                 
-        print(f"✅ Apex S&P 500 Scanner Complete. {len(df_full)} results including sectors.")
+        print(f"✅ Apex S&P 500 Scanner Complete. {len(df_full)} results logged.")
     except Exception as e: print(f"FATAL ERROR: {e}")
 
 if __name__ == "__main__":
