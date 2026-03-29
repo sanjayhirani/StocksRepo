@@ -46,17 +46,10 @@ def apply_pro_formatting(ws, df, is_journal=False):
             "verticalAlignment": "MIDDLE", "horizontalAlignment": "CENTER"
         })
 
-    # 3. Timestamp (Top Right)
+    # 3. Timestamp (Top Right) - Fixed Argument Order
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-    ws.update("J1", [[f"Last Sync: {now_str}"]])
+    ws.update([[f"Last Sync: {now_str}"]], "J1")
     ws.format("J1", {"textFormat": {"italic": True, "fontSize": 8, "foregroundColor": {"red": 0.4, "green": 0.4, "blue": 0.4}}})
-
-    # 4. Conditional Rules for Journal
-    if is_journal and rows > 1:
-        ws.conditional_format_rule(f"G2:G{rows}", {"type": "TEXT_CONTAINS", "values": [{"userEnteredValue": "TARGET HIT"}], "style": {"backgroundColor": {"red": 0.85, "green": 0.95, "blue": 0.85}, "textFormat": {"foregroundColor": {"red": 0.0, "green": 0.4, "blue": 0.0}, "bold": True}}})
-        ws.conditional_format_rule(f"G2:G{rows}", {"type": "TEXT_CONTAINS", "values": [{"userEnteredValue": "STOPPED OUT"}], "style": {"backgroundColor": {"red": 0.98, "green": 0.85, "blue": 0.85}, "textFormat": {"foregroundColor": {"red": 0.6, "green": 0.0, "blue": 0.0}, "bold": True}}})
-        ws.conditional_format_rule(f"I2:I{rows}", {"type": "NUMBER_GREATER", "values": [{"userEnteredValue": "0"}], "style": {"textFormat": {"foregroundColor": {"red": 0.0, "green": 0.5, "blue": 0.0}, "bold": True}}})
-        ws.conditional_format_rule(f"I2:I{rows}", {"type": "NUMBER_LESS", "values": [{"userEnteredValue": "0"}], "style": {"textFormat": {"foregroundColor": {"red": 0.7, "green": 0.0, "blue": 0.0}, "bold": True}}})
 
 def run_scanner():
     try:
@@ -169,7 +162,7 @@ def run_scanner():
                 total_pl = round(df_j['PL_Pct'].astype(float).sum(), 2)
                 
                 dash = [["KPI TERMINAL", ""], ["Wins ✅", w], ["Losses ❌", l], ["Win Rate %", f"{win_rate}%"], ["Total P/L", f"{total_pl}%"]]
-                ws_j.update("K1:L5", dash)
+                ws_j.update(dash, "K1:L5") # Fixed Argument Order
                 ws_j.format("K1:L1", {"backgroundColor": {"red": 0.0, "green": 0.2, "blue": 0.4}, "textFormat": {"foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True}})
                 ws_j.format("K5", {"textFormat": {"bold": True, "foregroundColor": {"red": 0, "green": 0.5, "blue": 0}} if total_pl >= 0 else {"foregroundColor": {"red": 0.7, "green": 0, "blue": 0}}})
             except Exception as je: print(f"Journal Error: {je}")
@@ -180,8 +173,10 @@ def run_scanner():
                 buf = io.BytesIO()
                 mpf.plot(hist, type='candle', addplot=[mpf.make_addplot(sma200_plt, color='blue', width=1.5)], style='charles', volume=True, savefig=buf, tight_layout=True)
                 buf.seek(0)
-                caption = (f"<b>{'🛡️' if 'LONG' in row.Setup else '⚠️'} {t} ({row.Sector})</b>\n<b>{row.Setup}</b>\n━━━━━━━━━━━━━━━━━━━━\n"
-                           f"⚔️ Trigger: ${row.Entry}\n💰 Price: ${row.Price}\n🛡️ Stop: ${row.Stop}\n🏁 Target: ${row.Target}\n📊 Score: {row.Score}")
+                caption = (f"<b>{'🛡️' if 'LONG' in row.Setup else '⚠️'} {t} ({row.Sector})</b>\n"
+                           f"<b>{row.Setup}</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                           f"⚔️ Trigger: ${row.Entry}\n💰 Price: ${row.Price}\n"
+                           f"🛡️ Stop: ${row.Stop}\n🏁 Target: ${row.Target}\n📊 Score: {row.Score}")
                 requests.post(f"https://api.telegram.org/bot{token}/sendPhoto", files={'photo': (f'{t}.png', buf)}, data={'chat_id': chat, 'caption': caption, 'parse_mode': 'HTML'})
                 plt.close('all')
                 
