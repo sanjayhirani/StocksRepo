@@ -17,7 +17,6 @@ def get_sp500_tickers():
     try:
         wiki_tables = pd.read_html(urlopen(Request(url, headers={'User-Agent': 'v'})))
         df = wiki_tables[0]
-        # Keep the Ticker and Sector association
         df['Symbol'] = df['Symbol'].str.replace('.', '-', regex=False)
         return df[['Symbol', 'GICS Sector']].values.tolist()
     except: return []
@@ -30,7 +29,7 @@ def calculate_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 def run_scanner():
-    """S&P 500 APEX SCANNER - FULL 500 + SECTORS + 2-5D SUMMARY"""
+    """S&P 500 APEX SCANNER - FULL 500 + SECTORS + TRADE JOURNAL"""
     try:
         token, chat = os.environ.get('TELEGRAM_BOT_TOKEN'), os.environ.get('TELEGRAM_CHAT_ID')
         creds_dict = json.loads(os.environ.get("GOOGLE_CREDS"))
@@ -69,7 +68,6 @@ def run_scanner():
                 
                 setup_type, trigger, stop, target, p_score, age = None, 0, 0, 0, 0, 0
 
-                # LONG: Quality Dip (Above 200 SMA)
                 if close > sma200 and rsi_window.min() < 35:
                     setup_type = "LONG"
                     p_score = round((40 - rsi_window.min()) * 5, 2)
@@ -78,7 +76,6 @@ def run_scanner():
                     stop = round(df['Low'].tail(5).min() - (atr * 1.5), 2)
                     target = round(close + (abs(close - stop) * 2.0), 2)
                 
-                # SHORT: Structural Breakdown (Below 200 SMA)
                 elif close < sma200 and rsi_window.max() > 65:
                     setup_type = "SHORT"
                     p_score = round((rsi_window.max() - 60) * 5, 2)
@@ -99,24 +96,80 @@ def run_scanner():
                         'Stop_Loss': stop, 'Target': target, 'Price': round(close, 2),
                         'YTD': round(((close/df['Close'].iloc[0])-1)*100, 1),
                         'Dist_To_Trigger': dist, 'Age_Val': age,
-                        'df_ptr': df, 'sma200_val': df['SMA200']
+                        'df_ptr': df, 'sma200_val': df['SMA200'], 'Type': setup_type
                     })
             except: continue
 
         df_full = pd.DataFrame(results)
         if not df_full.empty:
-            # 1. Summary: STRICT Age 2-5, Top 5 by Power Score
             df_summary = df_full[(df_full['Age_Val'] >= 2) & (df_full['Age_Val'] <= 5)].copy()
             df_summary = df_summary.sort_values(by=['Power_Score', 'Dist_To_Trigger'], ascending=[False, True]).head(5)
 
-            # 2. Core Screener: Full Variety (All 500+), sorted by Proximity
             df_core = df_full.sort_values(by=['Dist_To_Trigger', 'Power_Score'], ascending=[True, False])
             
             for sn in ["Summary", "Core Screener"]:
                 ws = sh.worksheet(sn); ws.clear()
                 source_df = df_summary if sn == "Summary" else df_core
-                final_cols = source_df.drop(columns=['df_ptr', 'sma200_val', 'Dist_To_Trigger', 'Age_Val'])
+                final_cols = source_df.drop(columns=['df_ptr', 'sma200_val', 'Dist_To_Trigger', 'Age_Val', 'Type'])
                 ws.update([final_cols.columns.tolist()] + final_cols.astype(str).values.tolist())
+
+            # --- START TRADE JOURNAL LOGIC ---
+            try:
+                try:
+                    ws_j = sh.worksheet("Trade Journal")
+                except:
+                    ws_j = sh.add_worksheet(title="Trade Journal", rows="1000", cols="20")
+                
+                existing_data = ws_j.get_all_records()
+                df_j = pd.DataFrame(existing_data) if existing_data else pd.DataFrame(columns=['Stock', 'Date', 'Type', 'Trigger', 'Stop', 'Target', 'Status', 'Current_Price'])
+
+                # Update Existing Trades
+                for idx, row in df_j.iterrows():
+                    if row['Status'] in ['ACTIVE', 'PENDING']:
+                        t_ticker = row['Stock']
+                        hist = yf.download(t_ticker, period="5d", progress=False)
+                        if not hist.empty:
+                            curr_close = hist['Close'].iloc[-1]
+                            week_low = hist['Low'].min()
+                            week_high = hist['High'].max()
+                            
+                            # Check Trigger
+                            if row['Status'] == 'PENDING':
+                                if (row['Type'] == 'LONG' and week_high >= row['Trigger']) or (row['Type'] == 'SHORT' and week_low <= row['Trigger']):
+                                    df_j.at[idx, 'Status'] = 'ACTIVE'
+                            
+                            # Check Exit
+                            if df_j.at[idx, 'Status'] == 'ACTIVE':
+                                if (row['Type'] == 'LONG' and week_low <= row['Stop']) or (row['Type'] == 'SHORT' and week_high >= row['Stop']):
+                                    df_j.at[idx, 'Status'] = 'STOPPED OUT'
+                                elif (row['Type'] == 'LONG' and week_high >= row['Target']) or (row['Type'] == 'SHORT' and week_low <= row['Target']):
+                                    df_j.at[idx, 'Status'] = 'TARGET HIT'
+                            
+                            df_j.at[idx, 'Current_Price'] = round(float(curr_close), 2)
+
+                # Add New #1 Trade
+                if not df_summary.empty:
+                    top_trade = df_summary.iloc[0]
+                    new_row = {
+                        'Stock': top_trade['Stock'], 'Date': datetime.now().strftime("%Y-%m-%d"),
+                        'Type': top_trade['Type'], 'Trigger': top_trade['Buy_At'] if top_trade['Type'] == "LONG" else top_trade['Sell_At'],
+                        'Stop': top_trade['Stop_Loss'], 'Target': top_trade['Target'], 
+                        'Status': 'PENDING', 'Current_Price': top_trade['Price']
+                    }
+                    df_j = pd.concat([df_j, pd.DataFrame([new_row])], ignore_index=True)
+
+                # Dashboard Calculation
+                wins = len(df_j[df_j['Status'] == 'TARGET HIT'])
+                losses = len(df_j[df_j['Status'] == 'STOPPED OUT'])
+                not_taken = len(df_j[df_j['Status'] == 'PENDING'])
+                
+                dash = [["DASHBOARD", ""], ["Wins", wins], ["Losses", losses], ["Pending", not_taken]]
+                
+                ws_j.clear()
+                ws_j.update("L1", dash) # Places Dashboard in Top Right (Column L)
+                ws_j.update([df_j.columns.tolist()] + df_j.astype(str).values.tolist())
+            except Exception as je: print(f"Journal Error: {je}")
+            # --- END TRADE JOURNAL LOGIC ---
 
             for _, row in df_summary.iterrows():
                 t, hist, sma200_plt = row.Stock, row['df_ptr'].tail(100), row['sma200_val'].tail(100)
